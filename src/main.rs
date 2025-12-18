@@ -100,10 +100,9 @@ struct Args {
     #[arg(
         short,
         long,
-        default_value_t = 50,
-        help = "Maximum number of scrolls (screenshot mode only)"
+        help = "Maximum number of scrolls (screenshot mode only, unlimited if not specified)"
     )]
-    max_scrolls: usize,
+    max_scrolls: Option<usize>,
 
     #[arg(
         long,
@@ -455,6 +454,42 @@ end tell
         Ok(())
     }
 
+    fn images_are_identical(&self, img1: &RgbaImage, img2: &RgbaImage) -> bool {
+        // Check if images have the same dimensions
+        if img1.width() != img2.width() || img1.height() != img2.height() {
+            println!("    [DEBUG] Size mismatch: {}x{} vs {}x{}",
+                     img1.width(), img1.height(), img2.width(), img2.height());
+            return false;
+        }
+
+        let width = img1.width();
+        let height = img1.height();
+        let total_pixels = (width * height) as usize;
+
+        println!("    [DEBUG] Comparing entire images: {}x{} ({} pixels)",
+                 width, height, total_pixels);
+
+        // Compare every pixel
+        let mut diff_count = 0;
+        for y in 0..height {
+            for x in 0..width {
+                if img1.get_pixel(x, y) != img2.get_pixel(x, y) {
+                    diff_count += 1;
+                    // Early exit if we find any difference
+                    if diff_count > 0 {
+                        let diff_percentage = (diff_count as f32 / total_pixels as f32) * 100.0;
+                        println!("    [DEBUG] Found {} different pixels ({:.6}%)",
+                                 diff_count, diff_percentage);
+                        return false;
+                    }
+                }
+            }
+        }
+
+        println!("    [DEBUG] Images are completely identical");
+        true
+    }
+
     fn images_are_similar(
         &self,
         img1: &RgbaImage,
@@ -761,7 +796,7 @@ end tell
     pub fn capture_with_scroll(
         &self,
         overlap: u32,
-        max_scrolls: usize,
+        max_scrolls: Option<usize>,
         delay: u64,
         key_type: &str,
         window_only: bool,
@@ -778,6 +813,11 @@ end tell
             key_type.to_uppercase()
         );
         println!("Scroll delay: {}ms", scroll_delay_ms);
+        if let Some(max) = max_scrolls {
+            println!("Max scrolls: {}", max);
+        } else {
+            println!("Max scrolls: unlimited (press Q to stop)");
+        }
         thread::sleep(Duration::from_secs(delay));
 
         // Determine crop region (manual crop takes precedence)
@@ -816,13 +856,27 @@ end tell
         let mut previous_capture = first_capture;
         let mut scroll_count = 0;
 
-        while scroll_count < max_scrolls {
-            println!(
-                "\n[{}/{}] Pressing {}...",
-                scroll_count + 1,
-                max_scrolls,
-                key_type.to_uppercase()
-            );
+        loop {
+            // Check if we've reached max_scrolls limit
+            if let Some(max) = max_scrolls {
+                if scroll_count >= max {
+                    println!("\n✓ Reached maximum scroll limit ({})", max);
+                    break;
+                }
+                println!(
+                    "\n[{}/{}] Pressing {}...",
+                    scroll_count + 1,
+                    max,
+                    key_type.to_uppercase()
+                );
+            } else {
+                println!(
+                    "\n[{}] Pressing {}...",
+                    scroll_count + 1,
+                    key_type.to_uppercase()
+                );
+            }
+
             self.scroll_down(key_type)?;
 
             // Wait for content to settle after scrolling
@@ -831,11 +885,12 @@ end tell
             let current_capture = self.capture_screen(crop_region)?;
             println!("✓ Captured screen {} ({}x{})", scroll_count + 2, current_capture.width(), current_capture.height());
 
-            let (is_similar, diff_percentage) = self.images_are_similar(&previous_capture, &current_capture, overlap);
-            println!("  Overlap comparison ({}px): diff={:.6}%, is_similar={}", overlap, diff_percentage, is_similar);
+            // Check if entire images are identical (no scrolling happened)
+            let is_identical = self.images_are_identical(&previous_capture, &current_capture);
+            println!("  Full image comparison: identical={}", is_identical);
 
-            if is_similar {
-                println!("\n⚠ Reached end of scrollable content (overlap regions are identical)");
+            if is_identical {
+                println!("\n⚠ Reached end of scrollable content (images are completely identical)");
                 break;
             }
 
@@ -1099,7 +1154,11 @@ fn main() -> Result<()> {
         println!("Configuration:");
         println!("  Output: {}", args.output);
         println!("  Overlap: {} pixels", args.overlap);
-        println!("  Max scrolls: {}", args.max_scrolls);
+        if let Some(max) = args.max_scrolls {
+            println!("  Max scrolls: {}", max);
+        } else {
+            println!("  Max scrolls: unlimited");
+        }
         println!("  Scroll key: {}", args.key);
         println!();
 
