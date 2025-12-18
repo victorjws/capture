@@ -476,7 +476,7 @@ end tell
 
         let mut diff_count = 0;
         let total_pixels = (overlap_height * width) as usize;
-        let threshold = (total_pixels as f32 * 0.05) as usize;
+        let threshold = (total_pixels as f32 * 0.00) as usize;
 
         for y in 0..overlap_height {
             for x in 0..width {
@@ -820,6 +820,14 @@ end tell
 
             let current_capture = self.capture_screen(crop_region)?;
             println!("✓ Captured screen {}", scroll_count + 2);
+
+            let (is_similar, diff_percentage) = self.images_are_similar(&previous_capture, &current_capture, overlap);
+            println!("  Image difference: {:.2}%", diff_percentage);
+
+            if is_similar {
+                println!("\n⚠ Reached end of scrollable content (images are {:.2}% similar)", 100.0 - diff_percentage);
+                break;
+            }
 
             images.push(current_capture.clone());
             previous_capture = current_capture;
