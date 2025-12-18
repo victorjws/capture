@@ -290,7 +290,7 @@ end tell
     fn get_focused_window_bounds(&self) -> Result<Option<(i32, i32, i32, i32)>> {
         unsafe {
             let hwnd = GetForegroundWindow();
-            if hwnd.0 == 0 {
+            if hwnd.0 == std::ptr::null_mut() {
                 return Ok(None);
             }
 
@@ -306,7 +306,7 @@ end tell
         Ok(None)
     }
 
-    fn capture_screen(&self) -> Result<RgbaImage> {
+    fn capture_screen(&self, crop_region: Option<(i32, i32, i32, i32)>) -> Result<RgbaImage> {
         // Try screenshots crate first (more compatible)
         let screen = screenshots::Screen::all()
             .map_err(|e| anyhow::anyhow!("Failed to get screens: {}", e))?
@@ -327,6 +327,28 @@ end tell
             // Manually copy RGBA values
             let rgba = Rgba([pixel[0], pixel[1], pixel[2], pixel[3]]);
             rgba_image.put_pixel(x, y, rgba);
+        }
+
+        // Apply crop if specified
+        if let Some((crop_x, crop_y, crop_w, crop_h)) = crop_region {
+            // Ensure crop region is within bounds
+            let crop_x = crop_x.max(0) as u32;
+            let crop_y = crop_y.max(0) as u32;
+            let crop_w = crop_w.max(0) as u32;
+            let crop_h = crop_h.max(0) as u32;
+
+            if crop_x + crop_w <= width && crop_y + crop_h <= height {
+                let mut cropped = RgbaImage::new(crop_w, crop_h);
+                for y in 0..crop_h {
+                    for x in 0..crop_w {
+                        let pixel = rgba_image.get_pixel(crop_x + x, crop_y + y);
+                        cropped.put_pixel(x, y, *pixel);
+                    }
+                }
+                return Ok(cropped);
+            } else {
+                println!("⚠ Crop region out of bounds, using full screen");
+            }
         }
 
         Ok(rgba_image)
@@ -469,12 +491,12 @@ end tell
         let _ = std::fs::remove_dir_all(frames_dir);
         std::fs::create_dir_all(frames_dir)?;
 
-        // Determine crop filter (manual crop takes precedence)
-        let crop_filter = if let Some(crop_str) = crop {
+        // Determine crop region (manual crop takes precedence)
+        let crop_region: Option<(i32, i32, i32, i32)> = if let Some(crop_str) = crop {
             // Manual crop region
             if let Some((x, y, w, h)) = Self::parse_crop_region(&crop_str) {
                 println!("✂️  Manual crop: {}x{} at ({}, {})", w, h, x, y);
-                Some(format!("crop={}:{}:{}:{}", w, h, x, y))
+                Some((x, y, w, h))
             } else {
                 println!("⚠ Invalid crop format, capturing full screen");
                 println!("   Use format: 'x,y,width,height' (e.g., '100,50,1920,1080')");
@@ -484,7 +506,7 @@ end tell
             // Auto-detect focused window
             if let Some((x, y, w, h)) = self.get_focused_window_bounds()? {
                 println!("📐 Focused window: {}x{} at ({}, {})", w, h, x, y);
-                Some(format!("crop={}:{}:{}:{}", w, h, x, y))
+                Some((x, y, w, h))
             } else {
                 println!("⚠ Could not detect focused window, capturing full screen");
                 None
@@ -502,18 +524,26 @@ end tell
         {
             cmd.arg("-f").arg("avfoundation")
                 .arg("-i").arg("1:none"); // Screen 1, no audio
+
+            // Add crop filter for macOS
+            if let Some((x, y, w, h)) = crop_region {
+                cmd.arg("-vf").arg(format!("crop={}:{}:{}:{}", w, h, x, y));
+            }
         }
 
         #[cfg(target_os = "windows")]
         {
             cmd.arg("-f").arg("gdigrab")
-                .arg("-framerate").arg("30")
-                .arg("-i").arg("desktop"); // Capture desktop
-        }
+                .arg("-framerate").arg("30");
 
-        // Add crop filter if capturing window only
-        if let Some(ref filter) = crop_filter {
-            cmd.arg("-vf").arg(filter);
+            // Add offset and video_size for Windows (more efficient than crop filter)
+            if let Some((x, y, w, h)) = crop_region {
+                cmd.arg("-offset_x").arg(x.to_string())
+                    .arg("-offset_y").arg(y.to_string())
+                    .arg("-video_size").arg(format!("{}x{}", w, h));
+            }
+
+            cmd.arg("-i").arg("desktop"); // Capture desktop
         }
 
         let mut ffmpeg_process = cmd
@@ -631,15 +661,39 @@ end tell
         Ok(result)
     }
 
-    pub fn capture_with_scroll(&self, overlap: u32, max_scrolls: usize, delay: u64, key_type: &str) -> Result<RgbaImage> {
+    pub fn capture_with_scroll(&self, overlap: u32, max_scrolls: usize, delay: u64, key_type: &str, window_only: bool, crop: Option<String>) -> Result<RgbaImage> {
         println!("Starting scroll capture in {} seconds...", delay);
         println!("Please focus on the window you want to capture!");
         println!("Make sure to grant Accessibility permission in System Settings > Privacy & Security");
         println!("The program will press {} key once per capture", key_type.to_uppercase());
         thread::sleep(Duration::from_secs(delay));
 
+        // Determine crop region (manual crop takes precedence)
+        let crop_region: Option<(i32, i32, i32, i32)> = if let Some(crop_str) = crop {
+            // Manual crop region
+            if let Some((x, y, w, h)) = Self::parse_crop_region(&crop_str) {
+                println!("✂️  Manual crop: {}x{} at ({}, {})", w, h, x, y);
+                Some((x, y, w, h))
+            } else {
+                println!("⚠ Invalid crop format, capturing full screen");
+                println!("   Use format: 'x,y,width,height' (e.g., '100,50,1920,1080')");
+                None
+            }
+        } else if window_only {
+            // Auto-detect focused window
+            if let Some((x, y, w, h)) = self.get_focused_window_bounds()? {
+                println!("📐 Focused window: {}x{} at ({}, {})", w, h, x, y);
+                Some((x, y, w, h))
+            } else {
+                println!("⚠ Could not detect focused window, capturing full screen");
+                None
+            }
+        } else {
+            None
+        };
+
         let mut images = Vec::new();
-        let first_capture = self.capture_screen()?;
+        let first_capture = self.capture_screen(crop_region)?;
         println!("✓ Captured screen 1 ({}x{})", first_capture.width(), first_capture.height());
         images.push(first_capture.clone());
 
@@ -650,7 +704,7 @@ end tell
             println!("\n[{}/{}] Pressing {}...", scroll_count + 1, max_scrolls, key_type.to_uppercase());
             self.scroll_down(key_type)?;
 
-            let current_capture = self.capture_screen()?;
+            let current_capture = self.capture_screen(crop_region)?;
             println!("✓ Captured screen {}", scroll_count + 2);
 
             let (is_similar, diff_percentage) = self.images_are_similar(&previous_capture, &current_capture, overlap);
@@ -764,6 +818,8 @@ fn main() -> Result<()> {
             args.max_scrolls,
             args.delay,
             &args.key,
+            args.window_only,
+            args.crop.clone(),
         )?;
 
         result_image.save(&args.output)?;
