@@ -462,6 +462,8 @@ end tell
         overlap_height: u32,
     ) -> (bool, f32) {
         if img1.width() != img2.width() || img1.height() != img2.height() {
+            println!("    [DEBUG] Size mismatch: {}x{} vs {}x{}",
+                     img1.width(), img1.height(), img2.width(), img2.height());
             return (false, 100.0);
         }
 
@@ -469,14 +471,18 @@ end tell
         let width = img1.width();
 
         if overlap_height >= height {
+            println!("    [DEBUG] Overlap too large: {} >= {}", overlap_height, height);
             return (false, 100.0);
         }
 
         let start_y1 = height - overlap_height;
+        println!("    [DEBUG] Comparing bottom {}px of img1 (y={}-{}) with top {}px of img2 (y=0-{})",
+                 overlap_height, start_y1, height, overlap_height, overlap_height);
 
         let mut diff_count = 0;
         let total_pixels = (overlap_height * width) as usize;
         let threshold = (total_pixels as f32 * 0.00) as usize;
+        println!("    [DEBUG] Total pixels to compare: {}, threshold: {}", total_pixels, threshold);
 
         for y in 0..overlap_height {
             for x in 0..width {
@@ -487,6 +493,8 @@ end tell
                     diff_count += 1;
                     if diff_count > threshold {
                         let diff_percentage = (diff_count as f32 / total_pixels as f32) * 100.0;
+                        println!("    [DEBUG] Early exit: {} different pixels found ({}%)",
+                                 diff_count, diff_percentage);
                         return (false, diff_percentage);
                     }
                 }
@@ -494,6 +502,8 @@ end tell
         }
 
         let diff_percentage = (diff_count as f32 / total_pixels as f32) * 100.0;
+        println!("    [DEBUG] Full scan complete: {} different pixels ({}%)",
+                 diff_count, diff_percentage);
         (true, diff_percentage)
     }
 
@@ -819,13 +829,13 @@ end tell
             thread::sleep(Duration::from_millis(scroll_delay_ms));
 
             let current_capture = self.capture_screen(crop_region)?;
-            println!("✓ Captured screen {}", scroll_count + 2);
+            println!("✓ Captured screen {} ({}x{})", scroll_count + 2, current_capture.width(), current_capture.height());
 
             let (is_similar, diff_percentage) = self.images_are_similar(&previous_capture, &current_capture, overlap);
-            println!("  Image difference: {:.2}%", diff_percentage);
+            println!("  Overlap comparison ({}px): diff={:.6}%, is_similar={}", overlap, diff_percentage, is_similar);
 
             if is_similar {
-                println!("\n⚠ Reached end of scrollable content (images are {:.2}% similar)", 100.0 - diff_percentage);
+                println!("\n⚠ Reached end of scrollable content (overlap regions are identical)");
                 break;
             }
 
