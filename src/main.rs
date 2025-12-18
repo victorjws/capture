@@ -1,24 +1,24 @@
 use anyhow::Result;
 use clap::Parser;
+use crossterm::event::{Event, KeyCode, KeyEvent, poll, read};
 use enigo::{Enigo, Key, Keyboard, Settings};
 use image::{ImageBuffer, Rgba, RgbaImage};
 use std::thread;
 use std::time::Duration;
-use crossterm::event::{poll, read, Event, KeyCode, KeyEvent};
 
 // macOS-specific imports
 #[cfg(target_os = "macos")]
-use core_graphics::display::{CGDisplay, CGMainDisplayID};
+use core_graphics::display::CGMainDisplayID;
 #[cfg(target_os = "macos")]
 use core_graphics::image::CGImageRef;
 
+#[cfg(target_os = "windows")]
+use windows::Win32::Foundation::{HWND, POINT, RECT};
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 // Windows-specific imports
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect};
-#[cfg(target_os = "windows")]
-use windows::Win32::Foundation::{RECT, HWND, POINT};
-#[cfg(target_os = "windows")]
-use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 #[derive(Parser, Debug)]
 #[command(name = "capture")]
@@ -27,37 +27,90 @@ struct Args {
     #[arg(short, long, default_value = "scroll_capture.png")]
     output: String,
 
-    #[arg(short = 'p', long, default_value_t = 100, help = "Overlap pixels for stitching")]
+    #[arg(
+        short = 'p',
+        long,
+        default_value_t = 100,
+        help = "Overlap pixels for stitching"
+    )]
     overlap: u32,
 
-    #[arg(short, long, default_value_t = 3, help = "Delay in seconds before starting capture")]
+    #[arg(
+        short,
+        long,
+        default_value_t = 3,
+        help = "Delay in seconds before starting capture"
+    )]
     delay: u64,
 
-    #[arg(short = 'k', long, default_value = "space", help = "Key to use for scrolling: space, down, pagedown")]
+    #[arg(
+        short = 'k',
+        long,
+        default_value = "space",
+        help = "Key to use for scrolling: space, down, pagedown"
+    )]
     key: String,
 
     // Video mode options
     #[arg(long, help = "Use video recording mode (recommended)")]
     video: bool,
 
-    #[arg(long, default_value_t = 10, help = "Video recording duration in seconds")]
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Video recording duration in seconds"
+    )]
     duration: u64,
 
-    #[arg(long, default_value_t = 2, help = "Frames per second to extract from video")]
+    #[arg(
+        long,
+        default_value_t = 2,
+        help = "Frames per second to extract from video"
+    )]
     fps: u32,
 
     #[arg(long, help = "Capture only the focused window (not full screen)")]
     window_only: bool,
 
-    #[arg(long, help = "Manual crop region as 'x,y,width,height' (e.g., '100,50,1920,1080')")]
+    #[arg(
+        long,
+        help = "Manual crop region as 'x,y,width,height' (e.g., '100,50,1920,1080')"
+    )]
     crop: Option<String>,
+
+    #[arg(
+        long,
+        help = "Use a crop preset (e.g., '1080p', 'vm-small', or custom preset name)"
+    )]
+    crop_preset: Option<String>,
 
     #[arg(long, help = "Interactive mode: select crop region with mouse")]
     select_region: bool,
 
+    #[arg(long, help = "List available crop presets")]
+    list_presets: bool,
+
+    #[arg(
+        long,
+        help = "Save current crop region as a preset: 'name:x,y,width,height'"
+    )]
+    save_preset: Option<String>,
+
     // Old mode options
-    #[arg(short, long, default_value_t = 50, help = "Maximum number of scrolls (screenshot mode only)")]
+    #[arg(
+        short,
+        long,
+        default_value_t = 50,
+        help = "Maximum number of scrolls (screenshot mode only)"
+    )]
     max_scrolls: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1000,
+        help = "Delay in milliseconds after scrolling before capturing (screenshot mode only)"
+    )]
+    scroll_delay: u64,
 }
 
 struct ScreenCapture {
@@ -106,7 +159,8 @@ end tell
 
         if output.status.success() {
             let result = String::from_utf8_lossy(&output.stdout);
-            let coords: Vec<i32> = result.trim()
+            let coords: Vec<i32> = result
+                .trim()
                 .split(',')
                 .filter_map(|s| s.trim().parse().ok())
                 .collect();
@@ -148,8 +202,7 @@ end tell
     #[cfg(target_os = "windows")]
     fn enable_zoom() -> Result<()> {
         // Launch Windows Magnifier
-        let _ = std::process::Command::new("magnify.exe")
-            .spawn();
+        let _ = std::process::Command::new("magnify.exe").spawn();
         Ok(())
     }
 
@@ -238,7 +291,9 @@ end tell
         let height = (y2 - y1).abs();
 
         if width <= 0 || height <= 0 {
-            return Err(anyhow::anyhow!("Invalid region: width and height must be positive"));
+            return Err(anyhow::anyhow!(
+                "Invalid region: width and height must be positive"
+            ));
         }
 
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -273,7 +328,9 @@ end tell
         if let Ok(output) = output {
             if output.status.success() {
                 let result = String::from_utf8_lossy(&output.stdout);
-                let parts: Vec<i32> = result.trim().split(',')
+                let parts: Vec<i32> = result
+                    .trim()
+                    .split(',')
                     .filter_map(|s| s.trim().parse().ok())
                     .collect();
 
@@ -314,7 +371,8 @@ end tell
             .next()
             .ok_or_else(|| anyhow::anyhow!("No screen found"))?;
 
-        let captured_image = screen.capture()
+        let captured_image = screen
+            .capture()
             .map_err(|e| anyhow::anyhow!("Failed to capture screen: {}", e))?;
 
         // screenshots crate uses image 0.24, we use 0.25
@@ -397,7 +455,12 @@ end tell
         Ok(())
     }
 
-    fn images_are_similar(&self, img1: &RgbaImage, img2: &RgbaImage, overlap_height: u32) -> (bool, f32) {
+    fn images_are_similar(
+        &self,
+        img1: &RgbaImage,
+        img2: &RgbaImage,
+        overlap_height: u32,
+    ) -> (bool, f32) {
         if img1.width() != img2.width() || img1.height() != img2.height() {
             return (false, 100.0);
         }
@@ -465,8 +528,20 @@ end tell
         result
     }
 
-    pub fn capture_with_video(&self, overlap: u32, duration: u64, delay: u64, key_type: &str, fps: u32, window_only: bool, crop: Option<String>) -> Result<RgbaImage> {
-        println!("Starting video-based scroll capture in {} seconds...", delay);
+    pub fn capture_with_video(
+        &self,
+        overlap: u32,
+        duration: u64,
+        delay: u64,
+        key_type: &str,
+        fps: u32,
+        window_only: bool,
+        crop: Option<String>,
+    ) -> Result<RgbaImage> {
+        println!(
+            "Starting video-based scroll capture in {} seconds...",
+            delay
+        );
         println!("Please focus on the window you want to capture!");
         println!("Video will be recorded for {} seconds", duration);
         thread::sleep(Duration::from_secs(delay));
@@ -522,8 +597,7 @@ end tell
 
         #[cfg(target_os = "macos")]
         {
-            cmd.arg("-f").arg("avfoundation")
-                .arg("-i").arg("1:none"); // Screen 1, no audio
+            cmd.arg("-f").arg("avfoundation").arg("-i").arg("1:none"); // Screen 1, no audio
 
             // Add crop filter for macOS
             if let Some((x, y, w, h)) = crop_region {
@@ -533,21 +607,24 @@ end tell
 
         #[cfg(target_os = "windows")]
         {
-            cmd.arg("-f").arg("gdigrab")
-                .arg("-framerate").arg("30");
+            cmd.arg("-f").arg("gdigrab").arg("-framerate").arg("30");
 
             // Add offset and video_size for Windows (more efficient than crop filter)
             if let Some((x, y, w, h)) = crop_region {
-                cmd.arg("-offset_x").arg(x.to_string())
-                    .arg("-offset_y").arg(y.to_string())
-                    .arg("-video_size").arg(format!("{}x{}", w, h));
+                cmd.arg("-offset_x")
+                    .arg(x.to_string())
+                    .arg("-offset_y")
+                    .arg(y.to_string())
+                    .arg("-video_size")
+                    .arg(format!("{}x{}", w, h));
             }
 
             cmd.arg("-i").arg("desktop"); // Capture desktop
         }
 
         let mut ffmpeg_process = cmd
-            .arg("-t").arg(duration.to_string())
+            .arg("-t")
+            .arg(duration.to_string())
             .arg("-y") // Overwrite output file
             .arg(video_file)
             .stdin(std::process::Stdio::piped())
@@ -573,7 +650,10 @@ end tell
             // Check for Q key to stop early
             if poll(Duration::from_millis(500))? {
                 match read()? {
-                    Event::Key(KeyEvent { code: KeyCode::Char('q') | KeyCode::Char('Q'), .. }) => {
+                    Event::Key(KeyEvent {
+                        code: KeyCode::Char('q') | KeyCode::Char('Q'),
+                        ..
+                    }) => {
                         println!("\n✓ Stopped by user");
                         user_stopped = true;
                         break;
@@ -604,8 +684,10 @@ end tell
 
         // Extract frames using ffmpeg
         let output = std::process::Command::new("ffmpeg")
-            .arg("-i").arg(video_file)
-            .arg("-vf").arg(format!("fps={}", fps))
+            .arg("-i")
+            .arg(video_file)
+            .arg("-vf")
+            .arg(format!("fps={}", fps))
             .arg(format!("{}/frame_%04d.png", frames_dir))
             .output()
             .map_err(|e| anyhow::anyhow!("Failed to extract frames: {}", e))?;
@@ -638,7 +720,8 @@ end tell
 
             // Skip similar frames
             if i > 0 {
-                let (is_similar, diff) = self.images_are_similar(&images.last().unwrap(), &img, overlap);
+                let (is_similar, diff) =
+                    self.images_are_similar(&images.last().unwrap(), &img, overlap);
                 println!("  Frame {} - diff: {:.1}%", i + 1, diff);
                 if !is_similar {
                     images.push(img);
@@ -652,7 +735,11 @@ end tell
         println!("\n✓ Selected {} unique frames for stitching", images.len());
 
         let result = self.stitch_images(images, overlap);
-        println!("✓ Done! Final image size: {}x{}", result.width(), result.height());
+        println!(
+            "✓ Done! Final image size: {}x{}",
+            result.width(),
+            result.height()
+        );
 
         // Clean up
         let _ = std::fs::remove_file(video_file);
@@ -661,11 +748,26 @@ end tell
         Ok(result)
     }
 
-    pub fn capture_with_scroll(&self, overlap: u32, max_scrolls: usize, delay: u64, key_type: &str, window_only: bool, crop: Option<String>) -> Result<RgbaImage> {
+    pub fn capture_with_scroll(
+        &self,
+        overlap: u32,
+        max_scrolls: usize,
+        delay: u64,
+        key_type: &str,
+        window_only: bool,
+        crop: Option<String>,
+        scroll_delay_ms: u64,
+    ) -> Result<RgbaImage> {
         println!("Starting scroll capture in {} seconds...", delay);
         println!("Please focus on the window you want to capture!");
-        println!("Make sure to grant Accessibility permission in System Settings > Privacy & Security");
-        println!("The program will press {} key once per capture", key_type.to_uppercase());
+        println!(
+            "Make sure to grant Accessibility permission in System Settings > Privacy & Security"
+        );
+        println!(
+            "The program will press {} key once per capture",
+            key_type.to_uppercase()
+        );
+        println!("Scroll delay: {}ms", scroll_delay_ms);
         thread::sleep(Duration::from_secs(delay));
 
         // Determine crop region (manual crop takes precedence)
@@ -694,36 +796,46 @@ end tell
 
         let mut images = Vec::new();
         let first_capture = self.capture_screen(crop_region)?;
-        println!("✓ Captured screen 1 ({}x{})", first_capture.width(), first_capture.height());
+        println!(
+            "✓ Captured screen 1 ({}x{})",
+            first_capture.width(),
+            first_capture.height()
+        );
         images.push(first_capture.clone());
 
         let mut previous_capture = first_capture;
         let mut scroll_count = 0;
 
         while scroll_count < max_scrolls {
-            println!("\n[{}/{}] Pressing {}...", scroll_count + 1, max_scrolls, key_type.to_uppercase());
+            println!(
+                "\n[{}/{}] Pressing {}...",
+                scroll_count + 1,
+                max_scrolls,
+                key_type.to_uppercase()
+            );
             self.scroll_down(key_type)?;
+
+            // Wait for content to settle after scrolling
+            thread::sleep(Duration::from_millis(scroll_delay_ms));
 
             let current_capture = self.capture_screen(crop_region)?;
             println!("✓ Captured screen {}", scroll_count + 2);
-
-            let (is_similar, diff_percentage) = self.images_are_similar(&previous_capture, &current_capture, overlap);
-            println!("  Image difference: {:.2}%", diff_percentage);
-
-            if is_similar {
-                println!("\n⚠ Reached end of scrollable content (images are {:.2}% similar)", 100.0 - diff_percentage);
-                break;
-            }
 
             images.push(current_capture.clone());
             previous_capture = current_capture;
             scroll_count += 1;
 
+            // Small delay before next scroll
+            thread::sleep(Duration::from_millis(300));
+
             // Check for user input to stop early
-            println!("  Press 'Q' to stop early (waiting 1s)...");
-            if poll(Duration::from_millis(1000))? {
+            println!("  Press 'Q' to stop early (waiting 500ms)...");
+            if poll(Duration::from_millis(500))? {
                 match read()? {
-                    Event::Key(KeyEvent { code: KeyCode::Char('q') | KeyCode::Char('Q'), .. }) => {
+                    Event::Key(KeyEvent {
+                        code: KeyCode::Char('q') | KeyCode::Char('Q'),
+                        ..
+                    }) => {
                         println!("\n✓ Stopped by user");
                         break;
                     }
@@ -739,15 +851,175 @@ end tell
 
         println!("\nStitching {} images together...", images.len());
         let result = self.stitch_images(images, overlap);
-        println!("✓ Done! Final image size: {}x{}", result.width(), result.height());
+        println!(
+            "✓ Done! Final image size: {}x{}",
+            result.width(),
+            result.height()
+        );
 
         Ok(result)
     }
 }
 
+fn get_preset_file_path() -> Result<std::path::PathBuf> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| anyhow::anyhow!("Could not find home directory"))?;
+    Ok(std::path::PathBuf::from(home).join(".capture-presets.json"))
+}
+
+fn load_presets() -> Result<std::collections::HashMap<String, String>> {
+    use std::collections::HashMap;
+
+    let preset_file = get_preset_file_path()?;
+
+    if !preset_file.exists() {
+        return Ok(HashMap::new());
+    }
+
+    let content = std::fs::read_to_string(&preset_file)?;
+    let presets: HashMap<String, String> =
+        serde_json::from_str(&content).unwrap_or_else(|_| HashMap::new());
+
+    Ok(presets)
+}
+
+fn save_presets(presets: &std::collections::HashMap<String, String>) -> Result<()> {
+    let preset_file = get_preset_file_path()?;
+    let content = serde_json::to_string_pretty(presets)?;
+    std::fs::write(&preset_file, content)?;
+    println!("✓ Presets saved to {}", preset_file.display());
+    Ok(())
+}
+
+fn get_builtin_presets() -> std::collections::HashMap<String, String> {
+    use std::collections::HashMap;
+    let mut presets = HashMap::new();
+
+    // Common screen resolutions
+    presets.insert("1080p".to_string(), "0,0,1920,1080".to_string());
+    presets.insert("720p".to_string(), "0,0,1280,720".to_string());
+    presets.insert("4k".to_string(), "0,0,3840,2160".to_string());
+    presets.insert("naver-series".to_string(), "607,23,690,1007".to_string());
+
+    // VM window presets (common sizes)
+    presets.insert("vm-small".to_string(), "100,100,1024,768".to_string());
+    presets.insert("vm-medium".to_string(), "100,100,1280,800".to_string());
+    presets.insert("vm-large".to_string(), "100,100,1920,1080".to_string());
+
+    presets
+}
+
+fn get_all_presets() -> Result<std::collections::HashMap<String, String>> {
+    let mut all_presets = get_builtin_presets();
+    let custom_presets = load_presets()?;
+
+    // Custom presets override built-in ones
+    all_presets.extend(custom_presets);
+
+    Ok(all_presets)
+}
+
+fn list_presets() -> Result<()> {
+    println!("\n📋 AVAILABLE CROP PRESETS");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+    let builtin = get_builtin_presets();
+    let custom = load_presets()?;
+
+    println!("\n🔧 Built-in presets:");
+    for (name, value) in builtin.iter() {
+        if !custom.contains_key(name) {
+            println!("  {} = {}", name, value);
+        }
+    }
+
+    if !custom.is_empty() {
+        println!("\n⭐ Custom presets:");
+        for (name, value) in custom.iter() {
+            println!("  {} = {}", name, value);
+        }
+
+        let preset_file = get_preset_file_path()?;
+        println!("\n📁 Custom presets file: {}", preset_file.display());
+    } else {
+        println!("\n⭐ Custom presets: (none)");
+        let preset_file = get_preset_file_path()?;
+        println!("   Save presets with: --save-preset name:x,y,w,h");
+        println!("   File will be created at: {}", preset_file.display());
+    }
+
+    println!("\n💡 Usage:");
+    println!("   --crop-preset <name>");
+    println!("   Example: --crop-preset 1080p");
+    println!();
+
+    Ok(())
+}
+
+fn save_preset_from_string(preset_str: &str) -> Result<()> {
+    let parts: Vec<&str> = preset_str.splitn(2, ':').collect();
+
+    if parts.len() != 2 {
+        return Err(anyhow::anyhow!(
+            "Invalid preset format. Use: name:x,y,width,height\nExample: --save-preset mypreset:100,50,1920,1080"
+        ));
+    }
+
+    let name = parts[0].trim();
+    let value = parts[1].trim();
+
+    // Validate the crop region format
+    if ScreenCapture::parse_crop_region(value).is_none() {
+        return Err(anyhow::anyhow!(
+            "Invalid crop region format: {}\nUse: x,y,width,height (e.g., '100,50,1920,1080')",
+            value
+        ));
+    }
+
+    let mut presets = load_presets()?;
+    presets.insert(name.to_string(), value.to_string());
+    save_presets(&presets)?;
+
+    println!("✓ Preset '{}' saved: {}", name, value);
+    println!("\n💡 Use with: --crop-preset {}", name);
+
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    // Handle --list-presets
+    if args.list_presets {
+        return list_presets();
+    }
+
+    // Handle --save-preset
+    if let Some(preset_str) = &args.save_preset {
+        return save_preset_from_string(preset_str);
+    }
+
     let capture = ScreenCapture::new();
+
+    // Resolve crop value (preset takes precedence if both are specified)
+    let crop_value = if let Some(preset_name) = &args.crop_preset {
+        let all_presets = get_all_presets()?;
+        match all_presets.get(preset_name) {
+            Some(value) => {
+                println!("📌 Using preset '{}': {}", preset_name, value);
+                Some(value.clone())
+            }
+            None => {
+                return Err(anyhow::anyhow!(
+                    "Preset '{}' not found. Use --list-presets to see available presets.",
+                    preset_name
+                ));
+            }
+        }
+    } else {
+        args.crop.clone()
+    };
 
     // Handle region selection mode
     if args.select_region {
@@ -798,7 +1070,7 @@ fn main() -> Result<()> {
             &args.key,
             args.fps,
             args.window_only,
-            args.crop.clone(),
+            crop_value.clone(),
         )?;
 
         result_image.save(&args.output)?;
@@ -819,7 +1091,8 @@ fn main() -> Result<()> {
             args.delay,
             &args.key,
             args.window_only,
-            args.crop.clone(),
+            crop_value.clone(),
+            args.scroll_delay,
         )?;
 
         result_image.save(&args.output)?;
