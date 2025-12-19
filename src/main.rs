@@ -30,7 +30,7 @@ struct Args {
     #[arg(
         short = 'p',
         long,
-        default_value_t = 100,
+        default_value_t = 125,
         help = "Overlap pixels for stitching"
     )]
     overlap: u32,
@@ -106,7 +106,7 @@ struct Args {
 
     #[arg(
         long,
-        default_value_t = 1000,
+        default_value_t = 200,
         help = "Delay in milliseconds after scrolling before capturing (screenshot mode only)"
     )]
     scroll_delay: u64,
@@ -561,23 +561,15 @@ end tell
                     let target_y = y_offset + y;
                     if target_y < total_height {
                         if i > 0 && y < overlap {
-                            // Blend in overlap region
-                            // alpha: 0.0 (top of overlap) -> 1.0 (bottom of overlap)
-                            let alpha = y as f32 / overlap as f32;
-
-                            let prev_pixel: Rgba<u8> = *result.get_pixel(x, target_y);
-                            let curr_pixel: Rgba<u8> = *img.get_pixel(x, y);
-
-                            let blended = Rgba([
-                                ((prev_pixel[0] as f32 * (1.0 - alpha)) + (curr_pixel[0] as f32 * alpha)) as u8,
-                                ((prev_pixel[1] as f32 * (1.0 - alpha)) + (curr_pixel[1] as f32 * alpha)) as u8,
-                                ((prev_pixel[2] as f32 * (1.0 - alpha)) + (curr_pixel[2] as f32 * alpha)) as u8,
-                                ((prev_pixel[3] as f32 * (1.0 - alpha)) + (curr_pixel[3] as f32 * alpha)) as u8,
-                            ]);
-
-                            result.put_pixel(x, target_y, blended);
+                            // Use middle of overlap as boundary
+                            if y >= overlap / 2 {
+                                // Bottom half of overlap: use current image
+                                let pixel = img.get_pixel(x, y);
+                                result.put_pixel(x, target_y, *pixel);
+                            }
+                            // Top half: skip (previous image already there)
                         } else {
-                            // Copy pixel normally (no blending)
+                            // Copy pixel normally (outside overlap region)
                             let pixel = img.get_pixel(x, y);
                             result.put_pixel(x, target_y, *pixel);
                         }
