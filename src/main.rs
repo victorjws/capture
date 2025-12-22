@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use capture::ScreenCapture;
+use capture::presets;
 
 #[derive(Parser, Debug)]
 #[command(name = "capture")]
@@ -97,73 +98,15 @@ struct Args {
     scroll_delay: u64,
 }
 
-fn get_preset_file_path() -> Result<std::path::PathBuf> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| anyhow::anyhow!("Could not find home directory"))?;
-    Ok(std::path::PathBuf::from(home).join(".capture-presets.json"))
-}
-
-fn load_presets() -> Result<std::collections::HashMap<String, String>> {
-    use std::collections::HashMap;
-
-    let preset_file = get_preset_file_path()?;
-
-    if !preset_file.exists() {
-        return Ok(HashMap::new());
-    }
-
-    let content = std::fs::read_to_string(&preset_file)?;
-    let presets: HashMap<String, String> =
-        serde_json::from_str(&content).unwrap_or_else(|_| HashMap::new());
-
-    Ok(presets)
-}
-
-fn save_presets(presets: &std::collections::HashMap<String, String>) -> Result<()> {
-    let preset_file = get_preset_file_path()?;
-    let content = serde_json::to_string_pretty(presets)?;
-    std::fs::write(&preset_file, content)?;
-    println!("✓ Presets saved to {}", preset_file.display());
-    Ok(())
-}
-
-fn get_builtin_presets() -> std::collections::HashMap<String, String> {
-    use std::collections::HashMap;
-    let mut presets = HashMap::new();
-
-    // Common screen resolutions
-    presets.insert("1080p".to_string(), "0,0,1920,1080".to_string());
-    presets.insert("720p".to_string(), "0,0,1280,720".to_string());
-    presets.insert("4k".to_string(), "0,0,3840,2160".to_string());
-    presets.insert("naver-series".to_string(), "607,23,690,1007".to_string());
-
-    // VM window presets (common sizes)
-    presets.insert("vm-small".to_string(), "100,100,1024,768".to_string());
-    presets.insert("vm-medium".to_string(), "100,100,1280,800".to_string());
-    presets.insert("vm-large".to_string(), "100,100,1920,1080".to_string());
-
-    presets
-}
-
-fn get_all_presets() -> Result<std::collections::HashMap<String, String>> {
-    let mut all_presets = get_builtin_presets();
-    let custom_presets = load_presets()?;
-
-    // Custom presets override built-in ones
-    all_presets.extend(custom_presets);
-
-    Ok(all_presets)
-}
 
 fn list_presets() -> Result<()> {
-    println!("\n📋 AVAILABLE CROP PRESETS");
+    println!("\nAVAILABLE CROP PRESETS");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    let builtin = get_builtin_presets();
-    let custom = load_presets()?;
+    let builtin = presets::get_builtin_presets();
+    let custom = presets::load_presets()?;
 
-    println!("\n🔧 Built-in presets:");
+    println!("\nBuilt-in presets:");
     for (name, value) in builtin.iter() {
         if !custom.contains_key(name) {
             println!("  {} = {}", name, value);
@@ -171,21 +114,21 @@ fn list_presets() -> Result<()> {
     }
 
     if !custom.is_empty() {
-        println!("\n⭐ Custom presets:");
+        println!("\nCustom presets:");
         for (name, value) in custom.iter() {
             println!("  {} = {}", name, value);
         }
 
-        let preset_file = get_preset_file_path()?;
-        println!("\n📁 Custom presets file: {}", preset_file.display());
+        let preset_file = presets::get_preset_file_path()?;
+        println!("\nCustom presets file: {}", preset_file.display());
     } else {
-        println!("\n⭐ Custom presets: (none)");
-        let preset_file = get_preset_file_path()?;
+        println!("\nCustom presets: (none)");
+        let preset_file = presets::get_preset_file_path()?;
         println!("   Save presets with: --save-preset name:x,y,w,h");
         println!("   File will be created at: {}", preset_file.display());
     }
 
-    println!("\n💡 Usage:");
+    println!("\nUsage:");
     println!("   --crop-preset <name>");
     println!("   Example: --crop-preset 1080p");
     println!();
@@ -206,19 +149,19 @@ fn save_preset_from_string(preset_str: &str) -> Result<()> {
     let value = parts[1].trim();
 
     // Validate the crop region format
-    if ScreenCapture::parse_crop_region(value).is_none() {
+    if presets::parse_crop_region(value).is_none() {
         return Err(anyhow::anyhow!(
             "Invalid crop region format: {}\nUse: x,y,width,height (e.g., '100,50,1920,1080')",
             value
         ));
     }
 
-    let mut presets = load_presets()?;
-    presets.insert(name.to_string(), value.to_string());
-    save_presets(&presets)?;
+    let mut preset_map = presets::load_presets()?;
+    preset_map.insert(name.to_string(), value.to_string());
+    presets::save_presets(&preset_map)?;
 
-    println!("✓ Preset '{}' saved: {}", name, value);
-    println!("\n💡 Use with: --crop-preset {}", name);
+    println!("Preset '{}' saved: {}", name, value);
+    println!("\nUse with: --crop-preset {}", name);
 
     Ok(())
 }
@@ -246,10 +189,10 @@ fn main() -> Result<()> {
 
     // Resolve crop value (preset takes precedence if both are specified)
     let crop_value = if let Some(preset_name) = &args.crop_preset {
-        let all_presets = get_all_presets()?;
+        let all_presets = presets::get_all_presets()?;
         match all_presets.get(preset_name) {
             Some(value) => {
-                println!("📌 Using preset '{}': {}", preset_name, value);
+                println!("Using preset '{}': {}", preset_name, value);
                 Some(value.clone())
             }
             None => {

@@ -1,4 +1,5 @@
 pub mod gui;
+pub mod presets;
 
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, poll, read};

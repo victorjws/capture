@@ -1,6 +1,7 @@
 use eframe::egui;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq)]
 enum CaptureMode {
@@ -44,6 +45,8 @@ struct CaptureConfig {
     // Crop settings
     window_only: bool,
     crop_enabled: bool,
+    use_preset: bool,
+    selected_preset: String,
     crop_x: i32,
     crop_y: i32,
     crop_width: i32,
@@ -64,6 +67,8 @@ impl Default for CaptureConfig {
             scroll_delay: 200,
             window_only: false,
             crop_enabled: false,
+            use_preset: false,
+            selected_preset: String::new(),
             crop_x: 0,
             crop_y: 0,
             crop_width: 1920,
@@ -84,14 +89,22 @@ pub struct CaptureApp {
     config: CaptureConfig,
     status: Arc<Mutex<CaptureStatus>>,
     is_running: Arc<Mutex<bool>>,
+    presets: HashMap<String, String>,
+    preset_names: Vec<String>,
 }
 
 impl Default for CaptureApp {
     fn default() -> Self {
+        let presets = crate::presets::get_all_presets().unwrap_or_default();
+        let mut preset_names: Vec<String> = presets.keys().cloned().collect();
+        preset_names.sort();
+
         Self {
             config: CaptureConfig::default(),
             status: Arc::new(Mutex::new(CaptureStatus::Idle)),
             is_running: Arc::new(Mutex::new(false)),
+            presets,
+            preset_names,
         }
     }
 }
@@ -144,7 +157,15 @@ impl CaptureApp {
         let capture = ScreenCapture::new();
 
         // Prepare crop option
-        let crop_option = if config.crop_enabled {
+        let crop_option = if config.use_preset && !config.selected_preset.is_empty() {
+            // Use preset value directly
+            use crate::presets;
+            if let Ok(all_presets) = presets::get_all_presets() {
+                all_presets.get(&config.selected_preset).cloned()
+            } else {
+                None
+            }
+        } else if config.crop_enabled {
             Some(format!("{},{},{},{}",
                 config.crop_x, config.crop_y,
                 config.crop_width, config.crop_height))
@@ -309,6 +330,57 @@ impl eframe::App for CaptureApp {
 
                     ui.checkbox(&mut self.config.window_only, "Capture focused window only");
 
+                    ui.separator();
+
+                    ui.checkbox(&mut self.config.use_preset, "Use crop preset");
+
+                    if self.config.use_preset {
+                        ui.horizontal(|ui| {
+                            ui.label("Preset:");
+                            egui::ComboBox::from_id_salt("preset_selector")
+                                .selected_text(
+                                    if self.config.selected_preset.is_empty() {
+                                        "Select preset..."
+                                    } else {
+                                        &self.config.selected_preset
+                                    }
+                                )
+                                .show_ui(ui, |ui| {
+                                    for preset_name in &self.preset_names {
+                                        let label_text = if let Some(value) = self.presets.get(preset_name) {
+                                            format!("{}: {}", preset_name, value)
+                                        } else {
+                                            preset_name.clone()
+                                        };
+
+                                        if ui.selectable_value(
+                                            &mut self.config.selected_preset,
+                                            preset_name.clone(),
+                                            label_text
+                                        ).clicked() {
+                                            // Apply preset values to crop fields
+                                            if let Some(crop_str) = self.presets.get(preset_name) {
+                                                if let Some((x, y, w, h)) = crate::presets::parse_crop_region(crop_str) {
+                                                    self.config.crop_x = x;
+                                                    self.config.crop_y = y;
+                                                    self.config.crop_width = w;
+                                                    self.config.crop_height = h;
+                                                }
+                                            }
+                                        }
+                                    }
+                                });
+                        });
+
+                        if !self.config.selected_preset.is_empty() {
+                            if let Some(value) = self.presets.get(&self.config.selected_preset) {
+                                ui.label(format!("Region: {}", value));
+                            }
+                        }
+                    }
+
+                    ui.separator();
+
                     ui.checkbox(&mut self.config.crop_enabled, "Custom crop region");
 
                     if self.config.crop_enabled {
@@ -387,7 +459,9 @@ impl CaptureApp {
             cmd.push("--window-only".to_string());
         }
 
-        if self.config.crop_enabled {
+        if self.config.use_preset && !self.config.selected_preset.is_empty() {
+            cmd.push(format!("--crop-preset {}", self.config.selected_preset));
+        } else if self.config.crop_enabled {
             cmd.push(format!("--crop \"{},{},{},{}\"",
                 self.config.crop_x, self.config.crop_y,
                 self.config.crop_width, self.config.crop_height));
