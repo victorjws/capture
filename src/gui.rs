@@ -89,6 +89,7 @@ pub struct CaptureApp {
     config: CaptureConfig,
     status: Arc<Mutex<CaptureStatus>>,
     is_running: Arc<Mutex<bool>>,
+    should_stop: Arc<Mutex<bool>>,
     presets: HashMap<String, String>,
     preset_names: Vec<String>,
 }
@@ -103,6 +104,7 @@ impl Default for CaptureApp {
             config: CaptureConfig::default(),
             status: Arc::new(Mutex::new(CaptureStatus::Idle)),
             is_running: Arc::new(Mutex::new(false)),
+            should_stop: Arc::new(Mutex::new(false)),
             presets,
             preset_names,
         }
@@ -117,29 +119,55 @@ impl CaptureApp {
     }
 
     fn setup_fonts(ctx: &egui::Context) {
+        // Try to load font from user-specified or default location
+        let mut font_paths = vec![
+            "assets/NotoSansKR-Regular.ttf".to_string(),
+            "NotoSansKR-Regular.ttf".to_string(),
+        ];
+
+        // Add user config directory path if available
+        if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+            font_paths.push(format!("{}/.config/capture/NotoSansKR-Regular.ttf", home));
+        }
+
         let mut fonts = egui::FontDefinitions::default();
+        let mut font_loaded = false;
 
-        // Load Korean font for Unicode support (Korean, Japanese, Chinese, etc.)
-        // Font file: assets/NotoSansKR-Regular.ttf
-        fonts.font_data.insert(
-            "noto_sans_kr".to_owned(),
-            std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
-                "../assets/NotoSansKR-Regular.ttf"
-            ))),
-        );
+        for path in font_paths.iter() {
+            if let Ok(font_data) = std::fs::read(path) {
+                fonts.font_data.insert(
+                    "custom_font".to_owned(),
+                    std::sync::Arc::new(egui::FontData::from_owned(font_data)),
+                );
 
-        // Set font priority (Korean font first, then default fonts as fallback)
-        fonts
-            .families
-            .entry(egui::FontFamily::Proportional)
-            .or_default()
-            .insert(0, "noto_sans_kr".to_owned());
+                fonts
+                    .families
+                    .entry(egui::FontFamily::Proportional)
+                    .or_default()
+                    .insert(0, "custom_font".to_owned());
 
-        fonts
-            .families
-            .entry(egui::FontFamily::Monospace)
-            .or_default()
-            .push("noto_sans_kr".to_owned());
+                fonts
+                    .families
+                    .entry(egui::FontFamily::Monospace)
+                    .or_default()
+                    .push("custom_font".to_owned());
+
+                font_loaded = true;
+                println!("Loaded font from: {}", path);
+                break;
+            }
+        }
+
+        if !font_loaded {
+            println!("No custom font found. Using default font.");
+            println!("For Unicode support (Korean, Japanese, Chinese, etc.):");
+            println!("  Place NotoSansKR-Regular.ttf in one of these locations:");
+            println!("    - assets/NotoSansKR-Regular.ttf");
+            println!("    - NotoSansKR-Regular.ttf (current directory)");
+            if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+                println!("    - {}/.config/capture/NotoSansKR-Regular.ttf", home);
+            }
+        }
 
         ctx.set_fonts(fonts);
     }
@@ -148,14 +176,16 @@ impl CaptureApp {
         let config = self.config.clone();
         let status = Arc::clone(&self.status);
         let is_running = Arc::clone(&self.is_running);
+        let should_stop = Arc::clone(&self.should_stop);
 
-        // Set running state
+        // Set running state and reset stop flag
         *is_running.lock().unwrap() = true;
+        *should_stop.lock().unwrap() = false;
         *status.lock().unwrap() = CaptureStatus::Running("Initializing capture...".to_string());
 
         // Spawn capture thread
         thread::spawn(move || {
-            let result = Self::run_capture(config, status.clone());
+            let result = Self::run_capture(config, status.clone(), should_stop.clone());
 
             *is_running.lock().unwrap() = false;
 
@@ -174,9 +204,14 @@ impl CaptureApp {
         });
     }
 
+    fn stop_capture(&mut self) {
+        *self.should_stop.lock().unwrap() = true;
+    }
+
     fn run_capture(
         config: CaptureConfig,
         status: Arc<Mutex<CaptureStatus>>,
+        should_stop: Arc<Mutex<bool>>,
     ) -> anyhow::Result<String> {
         use crate::ScreenCapture;
 
@@ -209,7 +244,7 @@ impl CaptureApp {
                     "Recording video...".to_string()
                 );
 
-                capture.capture_with_video_no_input(
+                capture.capture_with_video_with_stop(
                     config.overlap,
                     config.video_duration,
                     config.delay,
@@ -217,6 +252,7 @@ impl CaptureApp {
                     config.video_fps,
                     config.window_only,
                     crop_option,
+                    should_stop.clone(),
                 )?
             }
             CaptureMode::Screenshot => {
@@ -230,7 +266,7 @@ impl CaptureApp {
                     config.max_scrolls.parse().ok()
                 };
 
-                capture.capture_with_scroll_no_input(
+                capture.capture_with_scroll_with_stop(
                     config.overlap,
                     max_scrolls,
                     config.delay,
@@ -238,6 +274,7 @@ impl CaptureApp {
                     config.window_only,
                     crop_option,
                     config.scroll_delay,
+                    should_stop.clone(),
                 )?
             }
         };
@@ -436,10 +473,16 @@ impl eframe::App for CaptureApp {
                 let is_running = *self.is_running.lock().unwrap();
 
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(!is_running, egui::Button::new("🎬 Start Capture"))
+                    if ui.add_enabled(!is_running, egui::Button::new("▶ Start Capture"))
                         .clicked()
                     {
                         self.start_capture();
+                    }
+
+                    if ui.add_enabled(is_running, egui::Button::new("⏹ Stop Capture"))
+                        .clicked()
+                    {
+                        self.stop_capture();
                     }
 
                     if ui.button("📋 Copy Command").clicked() {

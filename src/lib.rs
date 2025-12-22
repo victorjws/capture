@@ -501,7 +501,7 @@ end tell
         window_only: bool,
         crop: Option<String>,
     ) -> Result<RgbaImage> {
-        self.capture_with_video_impl(overlap, duration, delay, key_type, fps, window_only, crop, false)
+        self.capture_with_video_impl(overlap, duration, delay, key_type, fps, window_only, crop, false, None)
     }
 
     pub fn capture_with_video_no_input(
@@ -514,7 +514,21 @@ end tell
         window_only: bool,
         crop: Option<String>,
     ) -> Result<RgbaImage> {
-        self.capture_with_video_impl(overlap, duration, delay, key_type, fps, window_only, crop, true)
+        self.capture_with_video_impl(overlap, duration, delay, key_type, fps, window_only, crop, true, None)
+    }
+
+    pub fn capture_with_video_with_stop(
+        &self,
+        overlap: u32,
+        duration: u64,
+        delay: u64,
+        key_type: &str,
+        fps: u32,
+        window_only: bool,
+        crop: Option<String>,
+        stop_flag: std::sync::Arc<std::sync::Mutex<bool>>,
+    ) -> Result<RgbaImage> {
+        self.capture_with_video_impl(overlap, duration, delay, key_type, fps, window_only, crop, true, Some(stop_flag))
     }
 
     fn capture_with_video_impl(
@@ -527,6 +541,7 @@ end tell
         window_only: bool,
         crop: Option<String>,
         skip_input: bool,
+        stop_flag: Option<std::sync::Arc<std::sync::Mutex<bool>>>,
     ) -> Result<RgbaImage> {
         println!(
             "Starting video-based scroll capture in {} seconds...",
@@ -635,6 +650,15 @@ end tell
         let mut user_stopped = false;
 
         while std::time::Instant::now() < end_time {
+            // Check stop flag
+            if let Some(ref flag) = stop_flag {
+                if *flag.lock().unwrap() {
+                    println!("\nStopped by user");
+                    user_stopped = true;
+                    break;
+                }
+            }
+
             self.scroll_down(key_type)?;
 
             // Check for Q key to stop early (only in terminal mode)
@@ -755,7 +779,7 @@ end tell
         crop: Option<String>,
         scroll_delay_ms: u64,
     ) -> Result<RgbaImage> {
-        self.capture_with_scroll_impl(overlap, max_scrolls, delay, key_type, window_only, crop, scroll_delay_ms, false)
+        self.capture_with_scroll_impl(overlap, max_scrolls, delay, key_type, window_only, crop, scroll_delay_ms, false, None)
     }
 
     pub fn capture_with_scroll_no_input(
@@ -768,7 +792,21 @@ end tell
         crop: Option<String>,
         scroll_delay_ms: u64,
     ) -> Result<RgbaImage> {
-        self.capture_with_scroll_impl(overlap, max_scrolls, delay, key_type, window_only, crop, scroll_delay_ms, true)
+        self.capture_with_scroll_impl(overlap, max_scrolls, delay, key_type, window_only, crop, scroll_delay_ms, true, None)
+    }
+
+    pub fn capture_with_scroll_with_stop(
+        &self,
+        overlap: u32,
+        max_scrolls: Option<usize>,
+        delay: u64,
+        key_type: &str,
+        window_only: bool,
+        crop: Option<String>,
+        scroll_delay_ms: u64,
+        stop_flag: std::sync::Arc<std::sync::Mutex<bool>>,
+    ) -> Result<RgbaImage> {
+        self.capture_with_scroll_impl(overlap, max_scrolls, delay, key_type, window_only, crop, scroll_delay_ms, true, Some(stop_flag))
     }
 
     fn capture_with_scroll_impl(
@@ -781,6 +819,7 @@ end tell
         crop: Option<String>,
         scroll_delay_ms: u64,
         skip_input: bool,
+        stop_flag: Option<std::sync::Arc<std::sync::Mutex<bool>>>,
     ) -> Result<RgbaImage> {
         println!("Starting scroll capture in {} seconds...", delay);
         println!("Please focus on the window you want to capture!");
@@ -836,6 +875,14 @@ end tell
         let mut scroll_count = 0;
 
         loop {
+            // Check stop flag
+            if let Some(ref flag) = stop_flag {
+                if *flag.lock().unwrap() {
+                    println!("\nStopped by user");
+                    break;
+                }
+            }
+
             // Check if we've reached max_scrolls limit
             if let Some(max) = max_scrolls {
                 if scroll_count >= max {

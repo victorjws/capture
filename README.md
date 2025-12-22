@@ -4,12 +4,14 @@ A powerful screen capture tool that automatically scrolls and stitches screensho
 
 ## Features
 
-- 🎬 **Video Mode** (Recommended): Records video while auto-scrolling, then extracts and stitches frames
-- 📸 **Screenshot Mode**: Takes individual screenshots while scrolling
+- 🎬 **Video Mode**: Records video while auto-scrolling, then extracts and stitches frames
+- 📸 **Screenshot Mode** (Default): Takes individual screenshots while scrolling
 - 🖱️ **Interactive Region Selection**: Visually select capture area with mouse
 - ✂️ **Flexible Cropping**: Crop specific regions or capture focused windows
 - 🎯 **Preset Support**: Save and reuse crop configurations
 - 🎨 **GUI & CLI**: Use graphical interface or command line
+- ⏹️ **Stop Anytime**: Cancel capture in progress from GUI
+- 🌏 **Unicode Support**: Optional font loading for Korean, Japanese, Chinese characters
 
 ## Installation
 
@@ -40,8 +42,11 @@ cargo run --bin capture-gui
 **GUI Features:**
 - Visual configuration of all capture settings
 - Real-time status updates during capture
+- **Stop capture anytime** with Stop button
+- Crop preset selector with dropdown
 - Equivalent CLI command generator
 - Copy settings to clipboard
+- Optional Unicode font support
 
 ### CLI Mode
 
@@ -100,6 +105,19 @@ Use a preset:
 - `720p` - 1280x720 HD
 - `4k` - 3840x2160 ultra HD
 - `vm-small`, `vm-medium`, `vm-large` - Common VM window sizes
+
+## Unicode Font Support
+
+For proper display of Korean, Japanese, Chinese and other Unicode characters in the GUI:
+
+1. Download Noto Sans KR font from [Google Fonts](https://fonts.google.com/noto/specimen/Noto+Sans+KR)
+2. Place the `.ttf` file in one of these locations:
+   - `assets/NotoSansKR-Regular.ttf`
+   - `NotoSansKR-Regular.ttf` (current directory)
+   - `~/.config/capture/NotoSansKR-Regular.ttf` (Linux/macOS)
+   - `%USERPROFILE%\.config\capture\NotoSansKR-Regular.ttf` (Windows)
+
+The GUI will automatically load the font if found. Without it, the GUI uses default fonts (English only).
 
 ## Platform Support
 
