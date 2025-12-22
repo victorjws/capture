@@ -60,7 +60,7 @@ impl Default for CaptureConfig {
             overlap: 125,
             delay: 3,
             scroll_key: ScrollKey::Space,
-            capture_mode: CaptureMode::Video,
+            capture_mode: CaptureMode::Screenshot,
             video_duration: 10,
             video_fps: 2,
             max_scrolls: String::new(),
@@ -253,7 +253,7 @@ impl eframe::App for CaptureApp {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Capture Mode:");
-                    ui.radio_value(&mut self.config.capture_mode, CaptureMode::Video, "Video (Recommended)");
+                    ui.radio_value(&mut self.config.capture_mode, CaptureMode::Video, "Video");
                     ui.radio_value(&mut self.config.capture_mode, CaptureMode::Screenshot, "Screenshot");
                 });
 
