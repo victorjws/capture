@@ -110,8 +110,38 @@ impl Default for CaptureApp {
 }
 
 impl CaptureApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Load fonts to support Unicode (including Korean, Japanese, Chinese, etc.)
+        Self::setup_fonts(&cc.egui_ctx);
         Self::default()
+    }
+
+    fn setup_fonts(ctx: &egui::Context) {
+        let mut fonts = egui::FontDefinitions::default();
+
+        // Load Korean font for Unicode support (Korean, Japanese, Chinese, etc.)
+        // Font file: assets/NotoSansKR-Regular.ttf
+        fonts.font_data.insert(
+            "noto_sans_kr".to_owned(),
+            std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+                "../assets/NotoSansKR-Regular.ttf"
+            ))),
+        );
+
+        // Set font priority (Korean font first, then default fonts as fallback)
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, "noto_sans_kr".to_owned());
+
+        fonts
+            .families
+            .entry(egui::FontFamily::Monospace)
+            .or_default()
+            .push("noto_sans_kr".to_owned());
+
+        ctx.set_fonts(fonts);
     }
 
     fn start_capture(&mut self) {
@@ -179,7 +209,7 @@ impl CaptureApp {
                     "Recording video...".to_string()
                 );
 
-                capture.capture_with_video(
+                capture.capture_with_video_no_input(
                     config.overlap,
                     config.video_duration,
                     config.delay,
@@ -200,7 +230,7 @@ impl CaptureApp {
                     config.max_scrolls.parse().ok()
                 };
 
-                capture.capture_with_scroll(
+                capture.capture_with_scroll_no_input(
                     config.overlap,
                     max_scrolls,
                     config.delay,

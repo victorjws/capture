@@ -501,6 +501,33 @@ end tell
         window_only: bool,
         crop: Option<String>,
     ) -> Result<RgbaImage> {
+        self.capture_with_video_impl(overlap, duration, delay, key_type, fps, window_only, crop, false)
+    }
+
+    pub fn capture_with_video_no_input(
+        &self,
+        overlap: u32,
+        duration: u64,
+        delay: u64,
+        key_type: &str,
+        fps: u32,
+        window_only: bool,
+        crop: Option<String>,
+    ) -> Result<RgbaImage> {
+        self.capture_with_video_impl(overlap, duration, delay, key_type, fps, window_only, crop, true)
+    }
+
+    fn capture_with_video_impl(
+        &self,
+        overlap: u32,
+        duration: u64,
+        delay: u64,
+        key_type: &str,
+        fps: u32,
+        window_only: bool,
+        crop: Option<String>,
+        skip_input: bool,
+    ) -> Result<RgbaImage> {
         println!(
             "Starting video-based scroll capture in {} seconds...",
             delay
@@ -610,25 +637,32 @@ end tell
         while std::time::Instant::now() < end_time {
             self.scroll_down(key_type)?;
 
-            // Check for Q key to stop early
-            if poll(Duration::from_millis(500))? {
-                match read()? {
-                    Event::Key(KeyEvent {
-                        code: KeyCode::Char('q') | KeyCode::Char('Q'),
-                        ..
-                    }) => {
-                        println!("\nStopped by user");
-                        user_stopped = true;
-                        break;
+            // Check for Q key to stop early (only in terminal mode)
+            if !skip_input {
+                if poll(Duration::from_millis(500))? {
+                    match read()? {
+                        Event::Key(KeyEvent {
+                            code: KeyCode::Char('q') | KeyCode::Char('Q'),
+                            ..
+                        }) => {
+                            println!("\nStopped by user");
+                            user_stopped = true;
+                            break;
+                        }
+                        _ => {} // Ignore other keys
                     }
-                    _ => {} // Ignore other keys
                 }
+            } else {
+                // In GUI mode, just sleep
+                thread::sleep(Duration::from_millis(500));
             }
         }
 
-        // Clear any remaining events
-        while poll(Duration::from_millis(0))? {
-            let _ = read();
+        // Clear any remaining events (only in terminal mode)
+        if !skip_input {
+            while poll(Duration::from_millis(0))? {
+                let _ = read();
+            }
         }
 
         println!("\nStopping recording...");
@@ -720,6 +754,33 @@ end tell
         window_only: bool,
         crop: Option<String>,
         scroll_delay_ms: u64,
+    ) -> Result<RgbaImage> {
+        self.capture_with_scroll_impl(overlap, max_scrolls, delay, key_type, window_only, crop, scroll_delay_ms, false)
+    }
+
+    pub fn capture_with_scroll_no_input(
+        &self,
+        overlap: u32,
+        max_scrolls: Option<usize>,
+        delay: u64,
+        key_type: &str,
+        window_only: bool,
+        crop: Option<String>,
+        scroll_delay_ms: u64,
+    ) -> Result<RgbaImage> {
+        self.capture_with_scroll_impl(overlap, max_scrolls, delay, key_type, window_only, crop, scroll_delay_ms, true)
+    }
+
+    fn capture_with_scroll_impl(
+        &self,
+        overlap: u32,
+        max_scrolls: Option<usize>,
+        delay: u64,
+        key_type: &str,
+        window_only: bool,
+        crop: Option<String>,
+        scroll_delay_ms: u64,
+        skip_input: bool,
     ) -> Result<RgbaImage> {
         println!("Starting scroll capture in {} seconds...", delay);
         println!("Please focus on the window you want to capture!");
@@ -819,25 +880,32 @@ end tell
             // Small delay before next scroll
             thread::sleep(Duration::from_millis(300));
 
-            // Check for user input to stop early
-            println!("  Press 'Q' to stop early (waiting 500ms)...");
-            if poll(Duration::from_millis(500))? {
-                match read()? {
-                    Event::Key(KeyEvent {
-                        code: KeyCode::Char('q') | KeyCode::Char('Q'),
-                        ..
-                    }) => {
-                        println!("\nStopped by user");
-                        break;
+            // Check for user input to stop early (only in terminal mode)
+            if !skip_input {
+                println!("  Press 'Q' to stop early (waiting 500ms)...");
+                if poll(Duration::from_millis(500))? {
+                    match read()? {
+                        Event::Key(KeyEvent {
+                            code: KeyCode::Char('q') | KeyCode::Char('Q'),
+                            ..
+                        }) => {
+                            println!("\nStopped by user");
+                            break;
+                        }
+                        _ => {} // Ignore other keys
                     }
-                    _ => {} // Ignore other keys
                 }
+            } else {
+                // In GUI mode, just sleep
+                thread::sleep(Duration::from_millis(500));
             }
         }
 
-        // Clear any remaining events before finishing
-        while poll(Duration::from_millis(0))? {
-            let _ = read();
+        // Clear any remaining events before finishing (only in terminal mode)
+        if !skip_input {
+            while poll(Duration::from_millis(0))? {
+                let _ = read();
+            }
         }
 
         println!("\nStitching {} images together...", images.len());
