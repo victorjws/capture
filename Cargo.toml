@@ -3,6 +3,18 @@ name = "capture"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "capture"
+path = "src/lib.rs"
+
+[[bin]]
+name = "capture"
+path = "src/main.rs"
+
+[[bin]]
+name = "capture-gui"
+path = "src/bin/capture-gui.rs"
+
 [dependencies]
 image = "0.25"
 enigo = "0.6.1"
@@ -12,6 +24,8 @@ crossterm = "0.29.0"
 screenshots = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+eframe = "0.31"
+egui = "0.31"
 
 # Platform-specific dependencies
 [target.'cfg(target_os = "macos")'.dependencies]
