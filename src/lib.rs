@@ -501,7 +501,7 @@ end tell
         window_only: bool,
         crop: Option<String>,
     ) -> Result<RgbaImage> {
-        self.capture_with_video_impl(overlap, duration, delay, key_type, fps, window_only, crop, false, None)
+        self.capture_with_video_impl(overlap, duration, delay, key_type, fps, window_only, crop, false, None, None)
     }
 
     pub fn capture_with_video_no_input(
@@ -514,7 +514,7 @@ end tell
         window_only: bool,
         crop: Option<String>,
     ) -> Result<RgbaImage> {
-        self.capture_with_video_impl(overlap, duration, delay, key_type, fps, window_only, crop, true, None)
+        self.capture_with_video_impl(overlap, duration, delay, key_type, fps, window_only, crop, true, None, None)
     }
 
     pub fn capture_with_video_with_stop(
@@ -527,8 +527,17 @@ end tell
         window_only: bool,
         crop: Option<String>,
         stop_flag: std::sync::Arc<std::sync::Mutex<bool>>,
+        logs: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     ) -> Result<RgbaImage> {
-        self.capture_with_video_impl(overlap, duration, delay, key_type, fps, window_only, crop, true, Some(stop_flag))
+        self.capture_with_video_impl(overlap, duration, delay, key_type, fps, window_only, crop, true, Some(stop_flag), Some(logs))
+    }
+
+    fn log_msg(logs: &Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>, msg: &str) {
+        if let Some(logs) = logs {
+            let timestamp = chrono::Local::now().format("%H:%M:%S");
+            logs.lock().unwrap().push(format!("[{}] {}", timestamp, msg));
+        }
+        println!("{}", msg);
     }
 
     fn capture_with_video_impl(
@@ -542,13 +551,11 @@ end tell
         crop: Option<String>,
         skip_input: bool,
         stop_flag: Option<std::sync::Arc<std::sync::Mutex<bool>>>,
+        logs: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
     ) -> Result<RgbaImage> {
-        println!(
-            "Starting video-based scroll capture in {} seconds...",
-            delay
-        );
-        println!("Please focus on the window you want to capture!");
-        println!("Video will be recorded for {} seconds", duration);
+        Self::log_msg(&logs, &format!("Starting video-based scroll capture in {} seconds...", delay));
+        Self::log_msg(&logs, "Please focus on the window you want to capture!");
+        Self::log_msg(&logs, &format!("Video will be recorded for {} seconds", duration));
         thread::sleep(Duration::from_secs(delay));
 
         #[cfg(target_os = "macos")]
@@ -575,27 +582,27 @@ end tell
         let crop_region: Option<(i32, i32, i32, i32)> = if let Some(crop_str) = crop {
             // Manual crop region
             if let Some((x, y, w, h)) = Self::parse_crop_region(&crop_str) {
-                println!("Manual crop: {}x{} at ({}, {})", w, h, x, y);
+                Self::log_msg(&logs, &format!("Manual crop: {}x{} at ({}, {})", w, h, x, y));
                 Some((x, y, w, h))
             } else {
-                println!("Invalid crop format, capturing full screen");
-                println!("   Use format: 'x,y,width,height' (e.g., '100,50,1920,1080')");
+                Self::log_msg(&logs, "Invalid crop format, capturing full screen");
+                Self::log_msg(&logs, "   Use format: 'x,y,width,height' (e.g., '100,50,1920,1080')");
                 None
             }
         } else if window_only {
             // Auto-detect focused window
             if let Some((x, y, w, h)) = self.get_focused_window_bounds()? {
-                println!("Focused window: {}x{} at ({}, {})", w, h, x, y);
+                Self::log_msg(&logs, &format!("Focused window: {}x{} at ({}, {})", w, h, x, y));
                 Some((x, y, w, h))
             } else {
-                println!("Could not detect focused window, capturing full screen");
+                Self::log_msg(&logs, "Could not detect focused window, capturing full screen");
                 None
             }
         } else {
             None
         };
 
-        println!("\nStarting video recording...");
+        Self::log_msg(&logs, "Starting video recording...");
 
         // Start ffmpeg video recording in background with stdin for control
         let mut cmd = std::process::Command::new("ffmpeg");
@@ -641,20 +648,21 @@ end tell
         // Wait a bit for ffmpeg to start
         thread::sleep(Duration::from_secs(2));
 
-        println!("Recording started, performing auto-scroll...");
-        println!("  Press 'Q' at any time to stop recording\n");
+        Self::log_msg(&logs, "Recording started, performing auto-scroll...");
+        if !skip_input {
+            println!("  Press 'Q' at any time to stop recording\n");
+        }
 
         // Perform auto-scrolling with Q key detection
-        let scroll_interval = Duration::from_millis(500);
         let end_time = std::time::Instant::now() + Duration::from_secs(duration - 2);
-        let mut user_stopped = false;
+        let mut _user_stopped = false;
 
         while std::time::Instant::now() < end_time {
             // Check stop flag
             if let Some(ref flag) = stop_flag {
                 if *flag.lock().unwrap() {
                     println!("\nStopped by user");
-                    user_stopped = true;
+                    _user_stopped = true;
                     break;
                 }
             }
@@ -670,7 +678,7 @@ end tell
                             ..
                         }) => {
                             println!("\nStopped by user");
-                            user_stopped = true;
+                            _user_stopped = true;
                             break;
                         }
                         _ => {} // Ignore other keys
@@ -689,7 +697,7 @@ end tell
             }
         }
 
-        println!("\nStopping recording...");
+        Self::log_msg(&logs, "Stopping recording...");
 
         // Send 'q' to ffmpeg stdin to stop gracefully
         if let Some(mut stdin) = ffmpeg_process.stdin.take() {
@@ -700,8 +708,8 @@ end tell
 
         let _ = ffmpeg_process.wait();
 
-        println!("Video recorded to {}", video_file);
-        println!("\nExtracting frames from video...");
+        Self::log_msg(&logs, &format!("Video recorded to {}", video_file));
+        Self::log_msg(&logs, "Extracting frames from video...");
 
         // Extract frames using ffmpeg
         let output = std::process::Command::new("ffmpeg")
@@ -717,9 +725,6 @@ end tell
             return Err(anyhow::anyhow!("Frame extraction failed"));
         }
 
-        println!("Frames extracted to {}", frames_dir);
-        println!("\nLoading and stitching frames...");
-
         // Load all frames
         let mut frame_paths: Vec<_> = std::fs::read_dir(frames_dir)?
             .filter_map(|e| e.ok())
@@ -733,7 +738,8 @@ end tell
             return Err(anyhow::anyhow!("No frames extracted"));
         }
 
-        println!("  Found {} frames", frame_paths.len());
+        Self::log_msg(&logs, &format!("Found {} frames to stitch", frame_paths.len()));
+        Self::log_msg(&logs, "Analyzing frames for duplicates...");
 
         let mut images = Vec::new();
         for (i, path) in frame_paths.iter().enumerate() {
@@ -743,24 +749,20 @@ end tell
             if i > 0 {
                 let (is_similar, diff) =
                     self.images_are_similar(&images.last().unwrap(), &img, overlap);
-                println!("  Frame {} - diff: {:.1}%", i + 1, diff);
+                Self::log_msg(&logs, &format!("  Frame {} - diff: {:.1}%", i + 1, diff));
                 if !is_similar {
                     images.push(img);
                 }
             } else {
-                println!("  Frame {} (first frame)", i + 1);
+                Self::log_msg(&logs, &format!("  Frame {} (first frame)", i + 1));
                 images.push(img);
             }
         }
 
-        println!("\nSelected {} unique frames for stitching", images.len());
+        Self::log_msg(&logs, &format!("Stitching {} unique frames...", images.len()));
 
         let result = self.stitch_images(images, overlap);
-        println!(
-            "Done! Final image size: {}x{}",
-            result.width(),
-            result.height()
-        );
+        Self::log_msg(&logs, &format!("Done! Final image: {}x{}", result.width(), result.height()));
 
         // Clean up
         let _ = std::fs::remove_file(video_file);
@@ -779,7 +781,7 @@ end tell
         crop: Option<String>,
         scroll_delay_ms: u64,
     ) -> Result<RgbaImage> {
-        self.capture_with_scroll_impl(overlap, max_scrolls, delay, key_type, window_only, crop, scroll_delay_ms, false, None)
+        self.capture_with_scroll_impl(overlap, max_scrolls, delay, key_type, window_only, crop, scroll_delay_ms, false, None, None)
     }
 
     pub fn capture_with_scroll_no_input(
@@ -792,7 +794,7 @@ end tell
         crop: Option<String>,
         scroll_delay_ms: u64,
     ) -> Result<RgbaImage> {
-        self.capture_with_scroll_impl(overlap, max_scrolls, delay, key_type, window_only, crop, scroll_delay_ms, true, None)
+        self.capture_with_scroll_impl(overlap, max_scrolls, delay, key_type, window_only, crop, scroll_delay_ms, true, None, None)
     }
 
     pub fn capture_with_scroll_with_stop(
@@ -805,8 +807,9 @@ end tell
         crop: Option<String>,
         scroll_delay_ms: u64,
         stop_flag: std::sync::Arc<std::sync::Mutex<bool>>,
+        logs: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     ) -> Result<RgbaImage> {
-        self.capture_with_scroll_impl(overlap, max_scrolls, delay, key_type, window_only, crop, scroll_delay_ms, true, Some(stop_flag))
+        self.capture_with_scroll_impl(overlap, max_scrolls, delay, key_type, window_only, crop, scroll_delay_ms, true, Some(stop_flag), Some(logs))
     }
 
     fn capture_with_scroll_impl(
@@ -820,21 +823,17 @@ end tell
         scroll_delay_ms: u64,
         skip_input: bool,
         stop_flag: Option<std::sync::Arc<std::sync::Mutex<bool>>>,
+        logs: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
     ) -> Result<RgbaImage> {
-        println!("Starting scroll capture in {} seconds...", delay);
-        println!("Please focus on the window you want to capture!");
-        println!(
-            "Make sure to grant Accessibility permission in System Settings > Privacy & Security"
-        );
-        println!(
-            "The program will press {} key once per capture",
-            key_type.to_uppercase()
-        );
-        println!("Scroll delay: {}ms", scroll_delay_ms);
+        Self::log_msg(&logs, &format!("Starting scroll capture in {} seconds...", delay));
+        Self::log_msg(&logs, "Please focus on the window you want to capture!");
+        Self::log_msg(&logs, "Make sure to grant Accessibility permission in System Settings > Privacy & Security");
+        Self::log_msg(&logs, &format!("The program will press {} key once per capture", key_type.to_uppercase()));
+        Self::log_msg(&logs, &format!("Scroll delay: {}ms", scroll_delay_ms));
         if let Some(max) = max_scrolls {
-            println!("Max scrolls: {}", max);
+            Self::log_msg(&logs, &format!("Max scrolls: {}", max));
         } else {
-            println!("Max scrolls: unlimited (press Q to stop)");
+            Self::log_msg(&logs, "Max scrolls: unlimited (press Q to stop)");
         }
         thread::sleep(Duration::from_secs(delay));
 
@@ -842,20 +841,20 @@ end tell
         let crop_region: Option<(i32, i32, i32, i32)> = if let Some(crop_str) = crop {
             // Manual crop region
             if let Some((x, y, w, h)) = Self::parse_crop_region(&crop_str) {
-                println!("Manual crop: {}x{} at ({}, {})", w, h, x, y);
+                Self::log_msg(&logs, &format!("Manual crop: {}x{} at ({}, {})", w, h, x, y));
                 Some((x, y, w, h))
             } else {
-                println!("Invalid crop format, capturing full screen");
-                println!("   Use format: 'x,y,width,height' (e.g., '100,50,1920,1080')");
+                Self::log_msg(&logs, "Invalid crop format, capturing full screen");
+                Self::log_msg(&logs, "   Use format: 'x,y,width,height' (e.g., '100,50,1920,1080')");
                 None
             }
         } else if window_only {
             // Auto-detect focused window
             if let Some((x, y, w, h)) = self.get_focused_window_bounds()? {
-                println!("Focused window: {}x{} at ({}, {})", w, h, x, y);
+                Self::log_msg(&logs, &format!("Focused window: {}x{} at ({}, {})", w, h, x, y));
                 Some((x, y, w, h))
             } else {
-                println!("Could not detect focused window, capturing full screen");
+                Self::log_msg(&logs, "Could not detect focused window, capturing full screen");
                 None
             }
         } else {
@@ -864,11 +863,8 @@ end tell
 
         let mut images = Vec::new();
         let first_capture = self.capture_screen(crop_region)?;
-        println!(
-            "Captured screen 1 ({}x{})",
-            first_capture.width(),
-            first_capture.height()
-        );
+        Self::log_msg(&logs, &format!("Captured screen 1 ({}x{})",
+            first_capture.width(), first_capture.height()));
         images.push(first_capture.clone());
 
         let mut previous_capture = first_capture;
@@ -878,7 +874,7 @@ end tell
             // Check stop flag
             if let Some(ref flag) = stop_flag {
                 if *flag.lock().unwrap() {
-                    println!("\nStopped by user");
+                    Self::log_msg(&logs, "Stopped by user");
                     break;
                 }
             }
@@ -886,21 +882,12 @@ end tell
             // Check if we've reached max_scrolls limit
             if let Some(max) = max_scrolls {
                 if scroll_count >= max {
-                    println!("\nReached maximum scroll limit ({})", max);
+                    Self::log_msg(&logs, &format!("Reached maximum scroll limit ({})", max));
                     break;
                 }
-                println!(
-                    "\n[{}/{}] Pressing {}...",
-                    scroll_count + 1,
-                    max,
-                    key_type.to_uppercase()
-                );
+                Self::log_msg(&logs, &format!("[{}/{}] Pressing {}...", scroll_count + 1, max, key_type.to_uppercase()));
             } else {
-                println!(
-                    "\n[{}] Pressing {}...",
-                    scroll_count + 1,
-                    key_type.to_uppercase()
-                );
+                Self::log_msg(&logs, &format!("[{}] Pressing {}...", scroll_count + 1, key_type.to_uppercase()));
             }
 
             self.scroll_down(key_type)?;
@@ -909,14 +896,14 @@ end tell
             thread::sleep(Duration::from_millis(scroll_delay_ms));
 
             let current_capture = self.capture_screen(crop_region)?;
-            println!("Captured screen {} ({}x{})", scroll_count + 2, current_capture.width(), current_capture.height());
+            Self::log_msg(&logs, &format!("Captured screen {} ({}x{})",
+                scroll_count + 2, current_capture.width(), current_capture.height()));
 
             // Check if entire images are identical (no scrolling happened)
             let is_identical = self.images_are_identical(&previous_capture, &current_capture);
-            println!("  Full image comparison: identical={}", is_identical);
 
             if is_identical {
-                println!("\nReached end of scrollable content (images are completely identical)");
+                Self::log_msg(&logs, "Reached end of scrollable content (images are completely identical)");
                 break;
             }
 
@@ -929,14 +916,13 @@ end tell
 
             // Check for user input to stop early (only in terminal mode)
             if !skip_input {
-                println!("  Press 'Q' to stop early (waiting 500ms)...");
                 if poll(Duration::from_millis(500))? {
                     match read()? {
                         Event::Key(KeyEvent {
                             code: KeyCode::Char('q') | KeyCode::Char('Q'),
                             ..
                         }) => {
-                            println!("\nStopped by user");
+                            Self::log_msg(&logs, "Stopped by user");
                             break;
                         }
                         _ => {} // Ignore other keys
@@ -955,13 +941,10 @@ end tell
             }
         }
 
-        println!("\nStitching {} images together...", images.len());
+        Self::log_msg(&logs, &format!("Stitching {} images...", images.len()));
         let result = self.stitch_images(images, overlap);
-        println!(
-            "Done! Final image size: {}x{}",
-            result.width(),
-            result.height()
-        );
+        Self::log_msg(&logs, &format!("Done! Final image: {}x{}",
+            result.width(), result.height()));
 
         Ok(result)
     }

@@ -51,6 +51,9 @@ struct CaptureConfig {
     crop_y: i32,
     crop_width: i32,
     crop_height: i32,
+
+    // Font settings
+    font_path: String,
 }
 
 impl Default for CaptureConfig {
@@ -73,6 +76,7 @@ impl Default for CaptureConfig {
             crop_y: 0,
             crop_width: 1920,
             crop_height: 1080,
+            font_path: String::new(),
         }
     }
 }
@@ -90,8 +94,10 @@ pub struct CaptureApp {
     status: Arc<Mutex<CaptureStatus>>,
     is_running: Arc<Mutex<bool>>,
     should_stop: Arc<Mutex<bool>>,
+    logs: Arc<Mutex<Vec<String>>>,
     presets: HashMap<String, String>,
     preset_names: Vec<String>,
+    font_status: String,
 }
 
 impl Default for CaptureApp {
@@ -105,8 +111,10 @@ impl Default for CaptureApp {
             status: Arc::new(Mutex::new(CaptureStatus::Idle)),
             is_running: Arc::new(Mutex::new(false)),
             should_stop: Arc::new(Mutex::new(false)),
+            logs: Arc::new(Mutex::new(Vec::new())),
             presets,
             preset_names,
+            font_status: "Using default font".to_string(),
         }
     }
 }
@@ -172,20 +180,69 @@ impl CaptureApp {
         ctx.set_fonts(fonts);
     }
 
+    fn load_font_from_path(&mut self, ctx: &egui::Context, path: &str) -> bool {
+        if path.is_empty() {
+            self.font_status = "No font path specified".to_string();
+            return false;
+        }
+
+        match std::fs::read(path) {
+            Ok(font_data) => {
+                let mut fonts = egui::FontDefinitions::default();
+
+                fonts.font_data.insert(
+                    "custom_font".to_owned(),
+                    std::sync::Arc::new(egui::FontData::from_owned(font_data)),
+                );
+
+                fonts
+                    .families
+                    .entry(egui::FontFamily::Proportional)
+                    .or_default()
+                    .insert(0, "custom_font".to_owned());
+
+                fonts
+                    .families
+                    .entry(egui::FontFamily::Monospace)
+                    .or_default()
+                    .push("custom_font".to_owned());
+
+                ctx.set_fonts(fonts);
+
+                // Extract just the filename for display
+                let filename = std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(path);
+
+                self.font_status = format!("Loaded: {}", filename);
+                true
+            }
+            Err(e) => {
+                self.font_status = format!("Failed to load font: {}", e);
+                false
+            }
+        }
+    }
+
     fn start_capture(&mut self) {
         let config = self.config.clone();
         let status = Arc::clone(&self.status);
         let is_running = Arc::clone(&self.is_running);
         let should_stop = Arc::clone(&self.should_stop);
+        let logs = Arc::clone(&self.logs);
 
         // Set running state and reset stop flag
         *is_running.lock().unwrap() = true;
         *should_stop.lock().unwrap() = false;
         *status.lock().unwrap() = CaptureStatus::Running("Initializing capture...".to_string());
 
+        // Clear previous logs
+        logs.lock().unwrap().clear();
+
         // Spawn capture thread
         thread::spawn(move || {
-            let result = Self::run_capture(config, status.clone(), should_stop.clone());
+            let result = Self::run_capture(config, status.clone(), should_stop.clone(), logs.clone());
 
             *is_running.lock().unwrap() = false;
 
@@ -208,13 +265,21 @@ impl CaptureApp {
         *self.should_stop.lock().unwrap() = true;
     }
 
+    fn log(logs: &Arc<Mutex<Vec<String>>>, message: String) {
+        let timestamp = chrono::Local::now().format("%H:%M:%S");
+        let log_entry = format!("[{}] {}", timestamp, message);
+        logs.lock().unwrap().push(log_entry);
+    }
+
     fn run_capture(
         config: CaptureConfig,
         status: Arc<Mutex<CaptureStatus>>,
         should_stop: Arc<Mutex<bool>>,
+        logs: Arc<Mutex<Vec<String>>>,
     ) -> anyhow::Result<String> {
         use crate::ScreenCapture;
 
+        Self::log(&logs, format!("Starting capture in {} seconds...", config.delay));
         *status.lock().unwrap() = CaptureStatus::Running(
             format!("Starting in {} seconds...", config.delay)
         );
@@ -240,9 +305,13 @@ impl CaptureApp {
 
         let result_image = match config.capture_mode {
             CaptureMode::Video => {
+                Self::log(&logs, "Starting video recording mode...".to_string());
                 *status.lock().unwrap() = CaptureStatus::Running(
                     "Recording video...".to_string()
                 );
+
+                Self::log(&logs, format!("Duration: {}s, FPS: {}, Overlap: {}px",
+                    config.video_duration, config.video_fps, config.overlap));
 
                 capture.capture_with_video_with_stop(
                     config.overlap,
@@ -253,9 +322,11 @@ impl CaptureApp {
                     config.window_only,
                     crop_option,
                     should_stop.clone(),
+                    logs.clone(),
                 )?
             }
             CaptureMode::Screenshot => {
+                Self::log(&logs, "Starting screenshot mode...".to_string());
                 *status.lock().unwrap() = CaptureStatus::Running(
                     "Capturing screenshots...".to_string()
                 );
@@ -266,6 +337,10 @@ impl CaptureApp {
                     config.max_scrolls.parse().ok()
                 };
 
+                Self::log(&logs, format!("Max scrolls: {:?}, Scroll delay: {}ms, Overlap: {}px",
+                    max_scrolls.map(|n: usize| n.to_string()).unwrap_or("unlimited".to_string()),
+                    config.scroll_delay, config.overlap));
+
                 capture.capture_with_scroll_with_stop(
                     config.overlap,
                     max_scrolls,
@@ -275,9 +350,12 @@ impl CaptureApp {
                     crop_option,
                     config.scroll_delay,
                     should_stop.clone(),
+                    logs.clone(),
                 )?
             }
         };
+
+        Self::log(&logs, "Saving image...".to_string());
 
         *status.lock().unwrap() = CaptureStatus::Running(
             "Saving image...".to_string()
@@ -311,6 +389,30 @@ impl eframe::App for CaptureApp {
                     ui.colored_label(egui::Color32::RED, format!("✗ {}", msg));
                 }
             }
+
+            ui.add_space(10.0);
+
+            // Log display
+            ui.group(|ui| {
+                ui.label("Capture Log");
+                ui.add_space(5.0);
+
+                let logs = self.logs.lock().unwrap();
+                let scroll_height = if logs.is_empty() { 50.0 } else { 150.0 };
+
+                egui::ScrollArea::vertical()
+                    .max_height(scroll_height)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        if logs.is_empty() {
+                            ui.label("No logs yet...");
+                        } else {
+                            for log in logs.iter() {
+                                ui.label(log);
+                            }
+                        }
+                    });
+            });
 
             ui.add_space(10.0);
             ui.separator();
@@ -465,6 +567,40 @@ impl eframe::App for CaptureApp {
                             ui.add(egui::DragValue::new(&mut self.config.crop_height).speed(1.0));
                         });
                     }
+                });
+
+                ui.add_space(10.0);
+
+                // Font settings
+                ui.group(|ui| {
+                    ui.label("Font Settings");
+
+                    ui.horizontal(|ui| {
+                        ui.label("Font file:");
+                        ui.text_edit_singleline(&mut self.config.font_path);
+
+                        if ui.button("Browse...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("Font files", &["ttf", "otf", "ttc"])
+                                .pick_file()
+                            {
+                                if let Some(path_str) = path.to_str() {
+                                    self.config.font_path = path_str.to_string();
+                                }
+                            }
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Load Font").clicked() {
+                            let font_path = self.config.font_path.clone();
+                            self.load_font_from_path(ctx, &font_path);
+                        }
+
+                        ui.label(&self.font_status);
+                    });
+
+                    ui.label("Tip: Load a font file to support different languages (Korean, Japanese, Chinese, etc.)");
                 });
 
                 ui.add_space(20.0);
