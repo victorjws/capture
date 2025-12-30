@@ -21,6 +21,43 @@ impl ScrollKey {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum StatusColor {
+    Blue,
+    LightBlue,
+    Yellow,
+    Cyan,
+    White,
+}
+
+impl StatusColor {
+    fn to_color32(&self) -> egui::Color32 {
+        match self {
+            StatusColor::Blue => egui::Color32::BLUE,
+            StatusColor::LightBlue => egui::Color32::from_rgb(100, 200, 255),
+            StatusColor::Yellow => egui::Color32::YELLOW,
+            StatusColor::Cyan => egui::Color32::from_rgb(0, 255, 255),
+            StatusColor::White => egui::Color32::WHITE,
+        }
+    }
+
+    fn name(&self) -> &str {
+        match self {
+            StatusColor::Blue => "Blue",
+            StatusColor::LightBlue => "Light Blue",
+            StatusColor::Yellow => "Yellow",
+            StatusColor::Cyan => "Cyan",
+            StatusColor::White => "White",
+        }
+    }
+}
+
+impl Default for StatusColor {
+    fn default() -> Self {
+        StatusColor::Yellow
+    }
+}
+
 #[derive(Clone)]
 struct CaptureConfig {
     output_path: String,
@@ -44,6 +81,9 @@ struct CaptureConfig {
 
     // Font settings
     font_path: String,
+
+    // UI settings
+    status_color: StatusColor,
 }
 
 impl Default for CaptureConfig {
@@ -64,6 +104,7 @@ impl Default for CaptureConfig {
             crop_width: defaults::CROP_WIDTH,
             crop_height: defaults::CROP_HEIGHT,
             font_path: String::new(),
+            status_color: StatusColor::default(),
         }
     }
 }
@@ -267,10 +308,23 @@ impl CaptureApp {
     ) -> anyhow::Result<String> {
         use crate::ScreenCapture;
 
-        Self::log(&logs, format!("Starting capture in {} seconds...", config.delay));
-        *status.lock().unwrap() = CaptureStatus::Running(
-            format!("Starting in {} seconds...", config.delay)
-        );
+        // Countdown display
+        if config.delay > 0 {
+            Self::log(&logs, format!("Starting capture in {} seconds...", config.delay));
+
+            for remaining in (1..=config.delay).rev() {
+                *status.lock().unwrap() = CaptureStatus::Running(
+                    format!("Starting in {} second{}...", remaining, if remaining > 1 { "s" } else { "" })
+                );
+
+                // Check if stop was requested during countdown
+                if *should_stop.lock().unwrap() {
+                    return Err(anyhow::anyhow!("Capture cancelled during countdown"));
+                }
+
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
 
         let capture = ScreenCapture::new();
 
@@ -309,7 +363,7 @@ impl CaptureApp {
         let result_image = capture.capture_with_scroll_with_stop(
             config.overlap,
             max_scrolls,
-            config.delay,
+            0, // Delay already handled in GUI countdown
             config.scroll_key.as_str(),
             config.window_only,
             crop_option,
@@ -342,7 +396,7 @@ impl eframe::App for CaptureApp {
                     ui.label("Ready to capture");
                 }
                 CaptureStatus::Running(msg) => {
-                    ui.colored_label(egui::Color32::BLUE, format!("⏳ {}", msg));
+                    ui.colored_label(self.config.status_color.to_color32(), format!("⏳ {}", msg));
                     ctx.request_repaint(); // Keep updating while running
                 }
                 CaptureStatus::Completed(msg) => {
@@ -547,6 +601,22 @@ impl eframe::App for CaptureApp {
                     });
 
                     ui.label("Tip: Load a font file to support different languages (Korean, Japanese, Chinese, etc.)");
+                });
+
+                ui.add_space(10.0);
+
+                // UI settings
+                ui.group(|ui| {
+                    ui.label("UI Settings");
+
+                    ui.horizontal(|ui| {
+                        ui.label("Status color:");
+                        ui.radio_value(&mut self.config.status_color, StatusColor::Blue, "Blue");
+                        ui.radio_value(&mut self.config.status_color, StatusColor::LightBlue, "Light Blue");
+                        ui.radio_value(&mut self.config.status_color, StatusColor::Yellow, "Yellow");
+                        ui.radio_value(&mut self.config.status_color, StatusColor::Cyan, "Cyan");
+                        ui.radio_value(&mut self.config.status_color, StatusColor::White, "White");
+                    });
                 });
 
                 ui.add_space(20.0);
