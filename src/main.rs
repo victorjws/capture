@@ -1,7 +1,7 @@
 use anyhow::Result;
-use clap::Parser;
 use capture::ScreenCapture;
 use capture::presets;
+use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(name = "capture")]
@@ -79,7 +79,6 @@ struct Args {
     )]
     scroll_delay: u64,
 }
-
 
 fn list_presets() -> Result<()> {
     println!("\nAVAILABLE CROP PRESETS");

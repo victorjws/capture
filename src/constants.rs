@@ -19,10 +19,8 @@ pub mod gui {
     pub const SCROLL_DELAY_MAX: u64 = 1000;
 
     // Default font paths
-    pub const DEFAULT_FONT_PATHS: &[&str] = &[
-        "assets/NotoSansKR-Regular.ttf",
-        "NotoSansKR-Regular.ttf",
-    ];
+    pub const DEFAULT_FONT_PATHS: &[&str] =
+        &["assets/NotoSansKR-Regular.ttf", "NotoSansKR-Regular.ttf"];
 
     pub fn get_config_font_path() -> Option<String> {
         if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
@@ -54,9 +52,4 @@ pub mod timing {
     pub const MOUSE_POSITION_POLL_MS: u64 = 100;
     pub const ZOOM_ENABLE_DELAY_MS: u64 = 500;
     pub const KEYBOARD_POLL_MS: u64 = 500;
-}
-
-// Similarity threshold
-pub mod similarity {
-    pub const DIFF_THRESHOLD_PERCENTAGE: f32 = 0.0;
 }

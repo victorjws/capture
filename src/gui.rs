@@ -1,8 +1,8 @@
+use crate::constants::{defaults, gui as gui_const};
 use eframe::egui;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::collections::HashMap;
-use crate::constants::{gui as gui_const, defaults};
 
 #[derive(Clone, Copy, PartialEq)]
 enum ScrollKey {
@@ -29,7 +29,7 @@ struct CaptureConfig {
     scroll_key: ScrollKey,
 
     // Screenshot mode settings
-    max_scrolls: String,  // Empty string means unlimited
+    max_scrolls: String, // Empty string means unlimited
     scroll_delay: u64,
 
     // Crop settings
@@ -75,7 +75,7 @@ impl Default for CaptureConfig {
 #[derive(Clone)]
 enum CaptureStatus {
     Idle,
-    Running(String),  // Status message
+    Running(String),   // Status message
     Completed(String), // Result message
     Error(String),
 }
@@ -242,20 +242,19 @@ impl CaptureApp {
 
         // Spawn capture thread
         thread::spawn(move || {
-            let result = Self::run_capture(config, status.clone(), should_stop.clone(), logs.clone());
+            let result =
+                Self::run_capture(config, status.clone(), should_stop.clone(), logs.clone());
 
             *is_running.lock().unwrap() = false;
 
             match result {
                 Ok(output_path) => {
-                    *status.lock().unwrap() = CaptureStatus::Completed(
-                        format!("Successfully saved to: {}", output_path)
-                    );
+                    *status.lock().unwrap() =
+                        CaptureStatus::Completed(format!("Successfully saved to: {}", output_path));
                 }
                 Err(e) => {
-                    *status.lock().unwrap() = CaptureStatus::Error(
-                        format!("Capture failed: {}", e)
-                    );
+                    *status.lock().unwrap() =
+                        CaptureStatus::Error(format!("Capture failed: {}", e));
                 }
             }
         });
@@ -281,12 +280,17 @@ impl CaptureApp {
 
         // Countdown display
         if config.delay > 0 {
-            Self::log(&logs, format!("Starting capture in {} seconds...", config.delay));
+            Self::log(
+                &logs,
+                format!("Starting capture in {} seconds...", config.delay),
+            );
 
             for remaining in (1..=config.delay).rev() {
-                *status.lock().unwrap() = CaptureStatus::Running(
-                    format!("Starting in {} second{}...", remaining, if remaining > 1 { "s" } else { "" })
-                );
+                *status.lock().unwrap() = CaptureStatus::Running(format!(
+                    "Starting in {} second{}...",
+                    remaining,
+                    if remaining > 1 { "s" } else { "" }
+                ));
 
                 // Check if stop was requested during countdown
                 if *should_stop.lock().unwrap() {
@@ -309,17 +313,16 @@ impl CaptureApp {
                 None
             }
         } else if config.crop_enabled {
-            Some(format!("{},{},{},{}",
-                config.crop_x, config.crop_y,
-                config.crop_width, config.crop_height))
+            Some(format!(
+                "{},{},{},{}",
+                config.crop_x, config.crop_y, config.crop_width, config.crop_height
+            ))
         } else {
             None
         };
 
         Self::log(&logs, "Starting screenshot mode...".to_string());
-        *status.lock().unwrap() = CaptureStatus::Running(
-            "Capturing screenshots...".to_string()
-        );
+        *status.lock().unwrap() = CaptureStatus::Running("Capturing screenshots...".to_string());
 
         let max_scrolls = if config.max_scrolls.is_empty() {
             None
@@ -327,9 +330,17 @@ impl CaptureApp {
             config.max_scrolls.parse().ok()
         };
 
-        Self::log(&logs, format!("Max scrolls: {:?}, Scroll delay: {}ms, Overlap: {}px",
-            max_scrolls.map(|n: usize| n.to_string()).unwrap_or("unlimited".to_string()),
-            config.scroll_delay, config.overlap));
+        Self::log(
+            &logs,
+            format!(
+                "Max scrolls: {:?}, Scroll delay: {}ms, Overlap: {}px",
+                max_scrolls
+                    .map(|n: usize| n.to_string())
+                    .unwrap_or("unlimited".to_string()),
+                config.scroll_delay,
+                config.overlap
+            ),
+        );
 
         let result_image = capture.capture_with_scroll_with_stop(
             config.overlap,
@@ -345,9 +356,7 @@ impl CaptureApp {
 
         Self::log(&logs, "Saving image...".to_string());
 
-        *status.lock().unwrap() = CaptureStatus::Running(
-            "Saving image...".to_string()
-        );
+        *status.lock().unwrap() = CaptureStatus::Running("Saving image...".to_string());
 
         result_image.save(&config.output_path)?;
         Ok(config.output_path.clone())
@@ -370,7 +379,7 @@ impl eframe::App for CaptureApp {
                     let color = egui::Color32::from_rgb(
                         self.config.status_color[0],
                         self.config.status_color[1],
-                        self.config.status_color[2]
+                        self.config.status_color[2],
                     );
                     ui.colored_label(color, format!("⏳ {}", msg));
                     ctx.request_repaint(); // Keep updating while running
@@ -395,11 +404,9 @@ impl eframe::App for CaptureApp {
             ui.add_space(10.0);
 
             // Tab content
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                match self.current_tab {
-                    Tab::Capture => self.render_capture_tab(ui, ctx),
-                    Tab::Settings => self.render_settings_tab(ui, ctx),
-                }
+            egui::ScrollArea::vertical().show(ui, |ui| match self.current_tab {
+                Tab::Capture => self.render_capture_tab(ui, ctx),
+                Tab::Settings => self.render_settings_tab(ui, ctx),
             });
         });
     }
@@ -408,194 +415,217 @@ impl eframe::App for CaptureApp {
 impl CaptureApp {
     fn render_capture_tab(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
         // Configuration UI
-                ui.heading("Screenshot Mode");
-                ui.add_space(10.0);
+        ui.heading("Screenshot Mode");
+        ui.add_space(10.0);
 
-                // Common settings
-                ui.group(|ui| {
-                    ui.label("Common Settings");
+        // Common settings
+        ui.group(|ui| {
+            ui.label("Common Settings");
 
-                    ui.horizontal(|ui| {
-                        ui.label("Output file:");
-                        ui.add(egui::TextEdit::singleline(&mut self.config.output_path)
-                            .desired_width(ui.available_width()));
-                    });
+            ui.horizontal(|ui| {
+                ui.label("Output file:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.config.output_path)
+                        .desired_width(ui.available_width()),
+                );
+            });
 
-                    ui.horizontal(|ui| {
-                        ui.label("Overlap pixels:");
-                        ui.add(egui::Slider::new(&mut self.config.overlap, gui_const::OVERLAP_MIN..=gui_const::OVERLAP_MAX));
-                    });
+            ui.horizontal(|ui| {
+                ui.label("Overlap pixels:");
+                ui.add(egui::Slider::new(
+                    &mut self.config.overlap,
+                    gui_const::OVERLAP_MIN..=gui_const::OVERLAP_MAX,
+                ));
+            });
 
-                    ui.horizontal(|ui| {
-                        ui.label("Delay before start (seconds):");
-                        ui.add(egui::Slider::new(&mut self.config.delay, gui_const::DELAY_MIN..=gui_const::DELAY_MAX));
-                    });
+            ui.horizontal(|ui| {
+                ui.label("Delay before start (seconds):");
+                ui.add(egui::Slider::new(
+                    &mut self.config.delay,
+                    gui_const::DELAY_MIN..=gui_const::DELAY_MAX,
+                ));
+            });
 
-                    ui.horizontal(|ui| {
-                        ui.label("Scroll key:");
-                        ui.radio_value(&mut self.config.scroll_key, ScrollKey::Space, "Space");
-                        ui.radio_value(&mut self.config.scroll_key, ScrollKey::Down, "Down Arrow");
-                        ui.radio_value(&mut self.config.scroll_key, ScrollKey::PageDown, "Page Down");
-                    });
-                });
+            ui.horizontal(|ui| {
+                ui.label("Scroll key:");
+                ui.radio_value(&mut self.config.scroll_key, ScrollKey::Space, "Space");
+                ui.radio_value(&mut self.config.scroll_key, ScrollKey::Down, "Down Arrow");
+                ui.radio_value(
+                    &mut self.config.scroll_key,
+                    ScrollKey::PageDown,
+                    "Page Down",
+                );
+            });
+        });
 
-                ui.add_space(10.0);
+        ui.add_space(10.0);
 
-                // Screenshot settings
-                ui.group(|ui| {
-                    ui.label("Screenshot Settings");
+        // Screenshot settings
+        ui.group(|ui| {
+            ui.label("Screenshot Settings");
 
-                    ui.horizontal(|ui| {
-                        ui.label("Max scrolls (leave empty for unlimited):");
-                        ui.add(egui::TextEdit::singleline(&mut self.config.max_scrolls)
-                            .desired_width(ui.available_width()));
-                    });
+            ui.horizontal(|ui| {
+                ui.label("Max scrolls (leave empty for unlimited):");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.config.max_scrolls)
+                        .desired_width(ui.available_width()),
+                );
+            });
 
-                    ui.horizontal(|ui| {
-                        ui.label("Scroll delay (milliseconds):");
-                        ui.add(egui::Slider::new(&mut self.config.scroll_delay, gui_const::SCROLL_DELAY_MIN..=gui_const::SCROLL_DELAY_MAX));
-                    });
-                });
+            ui.horizontal(|ui| {
+                ui.label("Scroll delay (milliseconds):");
+                ui.add(egui::Slider::new(
+                    &mut self.config.scroll_delay,
+                    gui_const::SCROLL_DELAY_MIN..=gui_const::SCROLL_DELAY_MAX,
+                ));
+            });
+        });
 
-                ui.add_space(10.0);
+        ui.add_space(10.0);
 
-                // Crop settings
-                ui.group(|ui| {
-                    ui.label("Crop Settings");
+        // Crop settings
+        ui.group(|ui| {
+            ui.label("Crop Settings");
 
-                    ui.checkbox(&mut self.config.window_only, "Capture focused window only");
+            ui.checkbox(&mut self.config.window_only, "Capture focused window only");
 
-                    ui.separator();
+            ui.separator();
 
-                    ui.checkbox(&mut self.config.use_preset, "Use crop preset");
+            ui.checkbox(&mut self.config.use_preset, "Use crop preset");
 
-                    if self.config.use_preset {
-                        ui.horizontal(|ui| {
-                            ui.label("Preset:");
-                            egui::ComboBox::from_id_salt("preset_selector")
-                                .selected_text(
-                                    if self.config.selected_preset.is_empty() {
-                                        "Select preset..."
-                                    } else {
-                                        &self.config.selected_preset
-                                    }
-                                )
-                                .show_ui(ui, |ui| {
-                                    for preset_name in &self.preset_names {
-                                        let label_text = if let Some(value) = self.presets.get(preset_name) {
-                                            format!("{}: {}", preset_name, value)
-                                        } else {
-                                            preset_name.clone()
-                                        };
+            if self.config.use_preset {
+                ui.horizontal(|ui| {
+                    ui.label("Preset:");
+                    egui::ComboBox::from_id_salt("preset_selector")
+                        .selected_text(if self.config.selected_preset.is_empty() {
+                            "Select preset..."
+                        } else {
+                            &self.config.selected_preset
+                        })
+                        .show_ui(ui, |ui| {
+                            for preset_name in &self.preset_names {
+                                let label_text = if let Some(value) = self.presets.get(preset_name)
+                                {
+                                    format!("{}: {}", preset_name, value)
+                                } else {
+                                    preset_name.clone()
+                                };
 
-                                        if ui.selectable_value(
-                                            &mut self.config.selected_preset,
-                                            preset_name.clone(),
-                                            label_text
-                                        ).clicked() {
-                                            // Apply preset values to crop fields
-                                            if let Some(crop_str) = self.presets.get(preset_name) {
-                                                if let Some((x, y, w, h)) = crate::presets::parse_crop_region(crop_str) {
-                                                    self.config.crop_x = x;
-                                                    self.config.crop_y = y;
-                                                    self.config.crop_width = w;
-                                                    self.config.crop_height = h;
-                                                }
-                                            }
+                                if ui
+                                    .selectable_value(
+                                        &mut self.config.selected_preset,
+                                        preset_name.clone(),
+                                        label_text,
+                                    )
+                                    .clicked()
+                                {
+                                    // Apply preset values to crop fields
+                                    if let Some(crop_str) = self.presets.get(preset_name) {
+                                        if let Some((x, y, w, h)) =
+                                            crate::presets::parse_crop_region(crop_str)
+                                        {
+                                            self.config.crop_x = x;
+                                            self.config.crop_y = y;
+                                            self.config.crop_width = w;
+                                            self.config.crop_height = h;
                                         }
                                     }
-                                });
-                        });
-
-                        if !self.config.selected_preset.is_empty() {
-                            if let Some(value) = self.presets.get(&self.config.selected_preset) {
-                                ui.label(format!("Region: {}", value));
-                            }
-                        }
-                    }
-
-                    ui.separator();
-
-                    ui.checkbox(&mut self.config.crop_enabled, "Custom crop region");
-
-                    if self.config.crop_enabled {
-                        ui.horizontal(|ui| {
-                            ui.label("X:");
-                            ui.add(egui::DragValue::new(&mut self.config.crop_x).speed(1.0));
-                            ui.label("Y:");
-                            ui.add(egui::DragValue::new(&mut self.config.crop_y).speed(1.0));
-                        });
-
-                        ui.horizontal(|ui| {
-                            ui.label("Width:");
-                            ui.add(egui::DragValue::new(&mut self.config.crop_width).speed(1.0));
-                            ui.label("Height:");
-                            ui.add(egui::DragValue::new(&mut self.config.crop_height).speed(1.0));
-                        });
-                    }
-                });
-
-                ui.add_space(20.0);
-
-                // Action buttons
-                let is_running = *self.is_running.lock().unwrap();
-
-                ui.horizontal(|ui| {
-                    if ui.add_enabled(!is_running, egui::Button::new("▶ Start Capture"))
-                        .clicked()
-                    {
-                        self.start_capture();
-                    }
-
-                    if ui.add_enabled(is_running, egui::Button::new("⏹ Stop Capture"))
-                        .clicked()
-                    {
-                        self.stop_capture();
-                    }
-
-                    if ui.button("📋 Copy Command").clicked() {
-                        let cmd = self.generate_cli_command();
-                        ui.ctx().copy_text(cmd);
-                    }
-                });
-
-                ui.add_space(10.0);
-
-                // Show equivalent CLI command
-                ui.group(|ui| {
-                    ui.label("Equivalent CLI command:");
-                    ui.add_space(5.0);
-                    let cmd = self.generate_cli_command();
-                    ui.code(&cmd);
-                });
-
-                ui.add_space(20.0);
-
-                // Capture Log (at the bottom)
-                ui.group(|ui| {
-                    ui.label("Capture Log");
-                    ui.add_space(5.0);
-
-                    let logs = self.logs.lock().unwrap();
-                    let scroll_height = if logs.is_empty() {
-                        gui_const::LOG_HEIGHT_EMPTY
-                    } else {
-                        gui_const::LOG_HEIGHT_WITH_CONTENT
-                    };
-
-                    egui::ScrollArea::vertical()
-                        .max_height(scroll_height)
-                        .stick_to_bottom(true)
-                        .show(ui, |ui| {
-                            if logs.is_empty() {
-                                ui.label("No logs yet...");
-                            } else {
-                                for log in logs.iter() {
-                                    ui.label(log);
                                 }
                             }
                         });
                 });
+
+                if !self.config.selected_preset.is_empty() {
+                    if let Some(value) = self.presets.get(&self.config.selected_preset) {
+                        ui.label(format!("Region: {}", value));
+                    }
+                }
+            }
+
+            ui.separator();
+
+            ui.checkbox(&mut self.config.crop_enabled, "Custom crop region");
+
+            if self.config.crop_enabled {
+                ui.horizontal(|ui| {
+                    ui.label("X:");
+                    ui.add(egui::DragValue::new(&mut self.config.crop_x).speed(1.0));
+                    ui.label("Y:");
+                    ui.add(egui::DragValue::new(&mut self.config.crop_y).speed(1.0));
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Width:");
+                    ui.add(egui::DragValue::new(&mut self.config.crop_width).speed(1.0));
+                    ui.label("Height:");
+                    ui.add(egui::DragValue::new(&mut self.config.crop_height).speed(1.0));
+                });
+            }
+        });
+
+        ui.add_space(20.0);
+
+        // Action buttons
+        let is_running = *self.is_running.lock().unwrap();
+
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!is_running, egui::Button::new("▶ Start Capture"))
+                .clicked()
+            {
+                self.start_capture();
+            }
+
+            if ui
+                .add_enabled(is_running, egui::Button::new("⏹ Stop Capture"))
+                .clicked()
+            {
+                self.stop_capture();
+            }
+
+            if ui.button("📋 Copy Command").clicked() {
+                let cmd = self.generate_cli_command();
+                ui.ctx().copy_text(cmd);
+            }
+        });
+
+        ui.add_space(10.0);
+
+        // Show equivalent CLI command
+        ui.group(|ui| {
+            ui.label("Equivalent CLI command:");
+            ui.add_space(5.0);
+            let cmd = self.generate_cli_command();
+            ui.code(&cmd);
+        });
+
+        ui.add_space(20.0);
+
+        // Capture Log (at the bottom)
+        ui.group(|ui| {
+            ui.label("Capture Log");
+            ui.add_space(5.0);
+
+            let logs = self.logs.lock().unwrap();
+            let scroll_height = if logs.is_empty() {
+                gui_const::LOG_HEIGHT_EMPTY
+            } else {
+                gui_const::LOG_HEIGHT_WITH_CONTENT
+            };
+
+            egui::ScrollArea::vertical()
+                .max_height(scroll_height)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    if logs.is_empty() {
+                        ui.label("No logs yet...");
+                    } else {
+                        for log in logs.iter() {
+                            ui.label(log);
+                        }
+                    }
+                });
+        });
     }
 
     fn render_settings_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -647,17 +677,23 @@ impl CaptureApp {
             // RGB Sliders
             ui.horizontal(|ui| {
                 ui.label("R:");
-                ui.add(egui::Slider::new(&mut self.config.status_color[0], 0..=255).fixed_decimals(0));
+                ui.add(
+                    egui::Slider::new(&mut self.config.status_color[0], 0..=255).fixed_decimals(0),
+                );
             });
 
             ui.horizontal(|ui| {
                 ui.label("G:");
-                ui.add(egui::Slider::new(&mut self.config.status_color[1], 0..=255).fixed_decimals(0));
+                ui.add(
+                    egui::Slider::new(&mut self.config.status_color[1], 0..=255).fixed_decimals(0),
+                );
             });
 
             ui.horizontal(|ui| {
                 ui.label("B:");
-                ui.add(egui::Slider::new(&mut self.config.status_color[2], 0..=255).fixed_decimals(0));
+                ui.add(
+                    egui::Slider::new(&mut self.config.status_color[2], 0..=255).fixed_decimals(0),
+                );
             });
 
             // Color preview
@@ -667,7 +703,7 @@ impl CaptureApp {
                 let color = egui::Color32::from_rgb(
                     self.config.status_color[0],
                     self.config.status_color[1],
-                    self.config.status_color[2]
+                    self.config.status_color[2],
                 );
                 ui.colored_label(color, "⏳ Sample status message");
             });
@@ -717,9 +753,13 @@ impl CaptureApp {
         if self.config.use_preset && !self.config.selected_preset.is_empty() {
             cmd.push(format!("--crop-preset {}", self.config.selected_preset));
         } else if self.config.crop_enabled {
-            cmd.push(format!("--crop \"{},{},{},{}\"",
-                self.config.crop_x, self.config.crop_y,
-                self.config.crop_width, self.config.crop_height));
+            cmd.push(format!(
+                "--crop \"{},{},{},{}\"",
+                self.config.crop_x,
+                self.config.crop_y,
+                self.config.crop_width,
+                self.config.crop_height
+            ));
         }
 
         cmd.join(" ")
