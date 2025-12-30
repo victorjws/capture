@@ -16,7 +16,7 @@ use core_graphics::display::CGMainDisplayID;
 use core_graphics::image::CGImageRef;
 
 #[cfg(target_os = "windows")]
-use windows::Win32::Foundation::{HWND, POINT, RECT};
+use windows::Win32::Foundation::{POINT, RECT};
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 #[cfg(target_os = "windows")]
@@ -398,58 +398,6 @@ end tell
 
         println!("    [DEBUG] Images are completely identical");
         true
-    }
-
-    fn images_are_similar(
-        &self,
-        img1: &RgbaImage,
-        img2: &RgbaImage,
-        overlap_height: u32,
-    ) -> (bool, f32) {
-        if img1.width() != img2.width() || img1.height() != img2.height() {
-            println!("    [DEBUG] Size mismatch: {}x{} vs {}x{}",
-                     img1.width(), img1.height(), img2.width(), img2.height());
-            return (false, 100.0);
-        }
-
-        let height = img1.height();
-        let width = img1.width();
-
-        if overlap_height >= height {
-            println!("    [DEBUG] Overlap too large: {} >= {}", overlap_height, height);
-            return (false, 100.0);
-        }
-
-        let start_y1 = height - overlap_height;
-        println!("    [DEBUG] Comparing bottom {}px of img1 (y={}-{}) with top {}px of img2 (y=0-{})",
-                 overlap_height, start_y1, height, overlap_height, overlap_height);
-
-        let mut diff_count = 0;
-        let total_pixels = (overlap_height * width) as usize;
-        let threshold = (total_pixels as f32 * similarity::DIFF_THRESHOLD_PERCENTAGE) as usize;
-        println!("    [DEBUG] Total pixels to compare: {}, threshold: {}", total_pixels, threshold);
-
-        for y in 0..overlap_height {
-            for x in 0..width {
-                let pixel1 = img1.get_pixel(x, start_y1 + y);
-                let pixel2 = img2.get_pixel(x, y);
-
-                if pixel1 != pixel2 {
-                    diff_count += 1;
-                    if diff_count > threshold {
-                        let diff_percentage = (diff_count as f32 / total_pixels as f32) * 100.0;
-                        println!("    [DEBUG] Early exit: {} different pixels found ({}%)",
-                                 diff_count, diff_percentage);
-                        return (false, diff_percentage);
-                    }
-                }
-            }
-        }
-
-        let diff_percentage = (diff_count as f32 / total_pixels as f32) * 100.0;
-        println!("    [DEBUG] Full scan complete: {} different pixels ({}%)",
-                 diff_count, diff_percentage);
-        (true, diff_percentage)
     }
 
     fn stitch_images(&self, images: Vec<RgbaImage>, overlap: u32) -> RgbaImage {
