@@ -21,43 +21,6 @@ impl ScrollKey {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum StatusColor {
-    Blue,
-    LightBlue,
-    Yellow,
-    Cyan,
-    White,
-}
-
-impl StatusColor {
-    fn to_color32(&self) -> egui::Color32 {
-        match self {
-            StatusColor::Blue => egui::Color32::BLUE,
-            StatusColor::LightBlue => egui::Color32::from_rgb(100, 200, 255),
-            StatusColor::Yellow => egui::Color32::YELLOW,
-            StatusColor::Cyan => egui::Color32::from_rgb(0, 255, 255),
-            StatusColor::White => egui::Color32::WHITE,
-        }
-    }
-
-    fn name(&self) -> &str {
-        match self {
-            StatusColor::Blue => "Blue",
-            StatusColor::LightBlue => "Light Blue",
-            StatusColor::Yellow => "Yellow",
-            StatusColor::Cyan => "Cyan",
-            StatusColor::White => "White",
-        }
-    }
-}
-
-impl Default for StatusColor {
-    fn default() -> Self {
-        StatusColor::Yellow
-    }
-}
-
 #[derive(Clone)]
 struct CaptureConfig {
     output_path: String,
@@ -83,7 +46,7 @@ struct CaptureConfig {
     font_path: String,
 
     // UI settings
-    status_color: StatusColor,
+    status_color: [u8; 3], // RGB color values
 }
 
 impl Default for CaptureConfig {
@@ -104,7 +67,7 @@ impl Default for CaptureConfig {
             crop_width: defaults::CROP_WIDTH,
             crop_height: defaults::CROP_HEIGHT,
             font_path: String::new(),
-            status_color: StatusColor::default(),
+            status_color: [255, 255, 0], // Yellow by default
         }
     }
 }
@@ -117,7 +80,14 @@ enum CaptureStatus {
     Error(String),
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Tab {
+    Capture,
+    Settings,
+}
+
 pub struct CaptureApp {
+    current_tab: Tab,
     config: CaptureConfig,
     status: Arc<Mutex<CaptureStatus>>,
     is_running: Arc<Mutex<bool>>,
@@ -135,6 +105,7 @@ impl Default for CaptureApp {
         preset_names.sort();
 
         Self {
+            current_tab: Tab::Capture,
             config: CaptureConfig::default(),
             status: Arc::new(Mutex::new(CaptureStatus::Idle)),
             is_running: Arc::new(Mutex::new(false)),
@@ -396,7 +367,12 @@ impl eframe::App for CaptureApp {
                     ui.label("Ready to capture");
                 }
                 CaptureStatus::Running(msg) => {
-                    ui.colored_label(self.config.status_color.to_color32(), format!("⏳ {}", msg));
+                    let color = egui::Color32::from_rgb(
+                        self.config.status_color[0],
+                        self.config.status_color[1],
+                        self.config.status_color[2]
+                    );
+                    ui.colored_label(color, format!("⏳ {}", msg));
                     ctx.request_repaint(); // Keep updating while running
                 }
                 CaptureStatus::Completed(msg) => {
@@ -409,38 +385,29 @@ impl eframe::App for CaptureApp {
 
             ui.add_space(10.0);
 
-            // Log display
-            ui.group(|ui| {
-                ui.label("Capture Log");
-                ui.add_space(5.0);
-
-                let logs = self.logs.lock().unwrap();
-                let scroll_height = if logs.is_empty() {
-                    gui_const::LOG_HEIGHT_EMPTY
-                } else {
-                    gui_const::LOG_HEIGHT_WITH_CONTENT
-                };
-
-                egui::ScrollArea::vertical()
-                    .max_height(scroll_height)
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        if logs.is_empty() {
-                            ui.label("No logs yet...");
-                        } else {
-                            for log in logs.iter() {
-                                ui.label(log);
-                            }
-                        }
-                    });
+            // Tab buttons
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.current_tab, Tab::Capture, "📷 Capture");
+                ui.selectable_value(&mut self.current_tab, Tab::Settings, "⚙ Settings");
             });
 
-            ui.add_space(10.0);
             ui.separator();
             ui.add_space(10.0);
 
-            // Configuration UI
+            // Tab content
             egui::ScrollArea::vertical().show(ui, |ui| {
+                match self.current_tab {
+                    Tab::Capture => self.render_capture_tab(ui, ctx),
+                    Tab::Settings => self.render_settings_tab(ui, ctx),
+                }
+            });
+        });
+    }
+}
+
+impl CaptureApp {
+    fn render_capture_tab(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+        // Configuration UI
                 ui.heading("Screenshot Mode");
                 ui.add_space(10.0);
 
@@ -568,57 +535,6 @@ impl eframe::App for CaptureApp {
                     }
                 });
 
-                ui.add_space(10.0);
-
-                // Font settings
-                ui.group(|ui| {
-                    ui.label("Font Settings");
-
-                    ui.horizontal(|ui| {
-                        ui.label("Font file:");
-                        ui.add(egui::TextEdit::singleline(&mut self.config.font_path)
-                            .desired_width(ui.available_width() - 80.0)); // Reserve space for Browse button
-
-                        if ui.button("Browse...").clicked() {
-                            if let Some(path) = rfd::FileDialog::new()
-                                .add_filter("Font files", &["ttf", "otf", "ttc"])
-                                .pick_file()
-                            {
-                                if let Some(path_str) = path.to_str() {
-                                    self.config.font_path = path_str.to_string();
-                                }
-                            }
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        if ui.button("Load Font").clicked() {
-                            let font_path = self.config.font_path.clone();
-                            self.load_font_from_path(ctx, &font_path);
-                        }
-
-                        ui.label(&self.font_status);
-                    });
-
-                    ui.label("Tip: Load a font file to support different languages (Korean, Japanese, Chinese, etc.)");
-                });
-
-                ui.add_space(10.0);
-
-                // UI settings
-                ui.group(|ui| {
-                    ui.label("UI Settings");
-
-                    ui.horizontal(|ui| {
-                        ui.label("Status color:");
-                        ui.radio_value(&mut self.config.status_color, StatusColor::Blue, "Blue");
-                        ui.radio_value(&mut self.config.status_color, StatusColor::LightBlue, "Light Blue");
-                        ui.radio_value(&mut self.config.status_color, StatusColor::Yellow, "Yellow");
-                        ui.radio_value(&mut self.config.status_color, StatusColor::Cyan, "Cyan");
-                        ui.radio_value(&mut self.config.status_color, StatusColor::White, "White");
-                    });
-                });
-
                 ui.add_space(20.0);
 
                 // Action buttons
@@ -652,6 +568,129 @@ impl eframe::App for CaptureApp {
                     let cmd = self.generate_cli_command();
                     ui.code(&cmd);
                 });
+
+                ui.add_space(20.0);
+
+                // Capture Log (at the bottom)
+                ui.group(|ui| {
+                    ui.label("Capture Log");
+                    ui.add_space(5.0);
+
+                    let logs = self.logs.lock().unwrap();
+                    let scroll_height = if logs.is_empty() {
+                        gui_const::LOG_HEIGHT_EMPTY
+                    } else {
+                        gui_const::LOG_HEIGHT_WITH_CONTENT
+                    };
+
+                    egui::ScrollArea::vertical()
+                        .max_height(scroll_height)
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            if logs.is_empty() {
+                                ui.label("No logs yet...");
+                            } else {
+                                for log in logs.iter() {
+                                    ui.label(log);
+                                }
+                            }
+                        });
+                });
+    }
+
+    fn render_settings_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.heading("Settings");
+        ui.add_space(10.0);
+
+        // Font settings
+        ui.group(|ui| {
+            ui.label("Font Settings");
+
+            ui.horizontal(|ui| {
+                ui.label("Font file:");
+                ui.add(egui::TextEdit::singleline(&mut self.config.font_path)
+                    .desired_width(ui.available_width() - 80.0));
+
+                if ui.button("Browse...").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Font files", &["ttf", "otf", "ttc"])
+                        .pick_file()
+                    {
+                        if let Some(path_str) = path.to_str() {
+                            self.config.font_path = path_str.to_string();
+                        }
+                    }
+                }
+            });
+
+            ui.horizontal(|ui| {
+                if ui.button("Load Font").clicked() {
+                    let font_path = self.config.font_path.clone();
+                    self.load_font_from_path(ctx, &font_path);
+                }
+
+                ui.label(&self.font_status);
+            });
+
+            ui.label("Tip: Load a font file to support different languages (Korean, Japanese, Chinese, etc.)");
+        });
+
+        ui.add_space(10.0);
+
+        // UI settings
+        ui.group(|ui| {
+            ui.label("UI Settings");
+
+            ui.label("Status message color:");
+            ui.add_space(5.0);
+
+            // RGB Sliders
+            ui.horizontal(|ui| {
+                ui.label("R:");
+                ui.add(egui::Slider::new(&mut self.config.status_color[0], 0..=255).fixed_decimals(0));
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("G:");
+                ui.add(egui::Slider::new(&mut self.config.status_color[1], 0..=255).fixed_decimals(0));
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("B:");
+                ui.add(egui::Slider::new(&mut self.config.status_color[2], 0..=255).fixed_decimals(0));
+            });
+
+            // Color preview
+            ui.add_space(5.0);
+            ui.horizontal(|ui| {
+                ui.label("Preview:");
+                let color = egui::Color32::from_rgb(
+                    self.config.status_color[0],
+                    self.config.status_color[1],
+                    self.config.status_color[2]
+                );
+                ui.colored_label(color, "⏳ Sample status message");
+            });
+
+            // Quick presets
+            ui.add_space(10.0);
+            ui.label("Quick presets:");
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Yellow").clicked() {
+                    self.config.status_color = [255, 255, 0];
+                }
+                if ui.button("Cyan").clicked() {
+                    self.config.status_color = [0, 255, 255];
+                }
+                if ui.button("Light Blue").clicked() {
+                    self.config.status_color = [100, 200, 255];
+                }
+                if ui.button("White").clicked() {
+                    self.config.status_color = [255, 255, 255];
+                }
+                if ui.button("Green").clicked() {
+                    self.config.status_color = [0, 255, 0];
+                }
             });
         });
     }
