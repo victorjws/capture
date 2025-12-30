@@ -2,12 +2,7 @@ use eframe::egui;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::collections::HashMap;
-
-#[derive(Clone, Copy, PartialEq)]
-enum CaptureMode {
-    Screenshot,
-    Video,
-}
+use crate::constants::{gui as gui_const, defaults};
 
 #[derive(Clone, Copy, PartialEq)]
 enum ScrollKey {
@@ -32,11 +27,6 @@ struct CaptureConfig {
     overlap: u32,
     delay: u64,
     scroll_key: ScrollKey,
-    capture_mode: CaptureMode,
-
-    // Video mode settings
-    video_duration: u64,
-    video_fps: u32,
 
     // Screenshot mode settings
     max_scrolls: String,  // Empty string means unlimited
@@ -59,23 +49,20 @@ struct CaptureConfig {
 impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
-            output_path: "scroll_capture.png".to_string(),
-            overlap: 125,
-            delay: 3,
+            output_path: defaults::OUTPUT_PATH.to_string(),
+            overlap: defaults::OVERLAP,
+            delay: defaults::DELAY,
             scroll_key: ScrollKey::Space,
-            capture_mode: CaptureMode::Screenshot,
-            video_duration: 10,
-            video_fps: 2,
-            max_scrolls: String::new(),
-            scroll_delay: 200,
+            max_scrolls: defaults::MAX_SCROLLS_DEFAULT.to_string(),
+            scroll_delay: defaults::SCROLL_DELAY,
             window_only: false,
             crop_enabled: false,
             use_preset: false,
             selected_preset: String::new(),
-            crop_x: 0,
-            crop_y: 0,
-            crop_width: 1920,
-            crop_height: 1080,
+            crop_x: defaults::CROP_X,
+            crop_y: defaults::CROP_Y,
+            crop_width: defaults::CROP_WIDTH,
+            crop_height: defaults::CROP_HEIGHT,
             font_path: String::new(),
         }
     }
@@ -128,14 +115,14 @@ impl CaptureApp {
 
     fn setup_fonts(ctx: &egui::Context) {
         // Try to load font from user-specified or default location
-        let mut font_paths = vec![
-            "assets/NotoSansKR-Regular.ttf".to_string(),
-            "NotoSansKR-Regular.ttf".to_string(),
-        ];
+        let mut font_paths: Vec<String> = gui_const::DEFAULT_FONT_PATHS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
 
         // Add user config directory path if available
-        if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
-            font_paths.push(format!("{}/.config/capture/NotoSansKR-Regular.ttf", home));
+        if let Some(config_path) = gui_const::get_config_font_path() {
+            font_paths.push(config_path);
         }
 
         let mut fonts = egui::FontDefinitions::default();
@@ -170,10 +157,11 @@ impl CaptureApp {
             println!("No custom font found. Using default font.");
             println!("For Unicode support (Korean, Japanese, Chinese, etc.):");
             println!("  Place NotoSansKR-Regular.ttf in one of these locations:");
-            println!("    - assets/NotoSansKR-Regular.ttf");
-            println!("    - NotoSansKR-Regular.ttf (current directory)");
-            if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
-                println!("    - {}/.config/capture/NotoSansKR-Regular.ttf", home);
+            for path in gui_const::DEFAULT_FONT_PATHS {
+                println!("    - {}", path);
+            }
+            if let Some(config_path) = gui_const::get_config_font_path() {
+                println!("    - {}", config_path);
             }
         }
 
@@ -303,57 +291,32 @@ impl CaptureApp {
             None
         };
 
-        let result_image = match config.capture_mode {
-            CaptureMode::Video => {
-                Self::log(&logs, "Starting video recording mode...".to_string());
-                *status.lock().unwrap() = CaptureStatus::Running(
-                    "Recording video...".to_string()
-                );
+        Self::log(&logs, "Starting screenshot mode...".to_string());
+        *status.lock().unwrap() = CaptureStatus::Running(
+            "Capturing screenshots...".to_string()
+        );
 
-                Self::log(&logs, format!("Duration: {}s, FPS: {}, Overlap: {}px",
-                    config.video_duration, config.video_fps, config.overlap));
-
-                capture.capture_with_video_with_stop(
-                    config.overlap,
-                    config.video_duration,
-                    config.delay,
-                    config.scroll_key.as_str(),
-                    config.video_fps,
-                    config.window_only,
-                    crop_option,
-                    should_stop.clone(),
-                    logs.clone(),
-                )?
-            }
-            CaptureMode::Screenshot => {
-                Self::log(&logs, "Starting screenshot mode...".to_string());
-                *status.lock().unwrap() = CaptureStatus::Running(
-                    "Capturing screenshots...".to_string()
-                );
-
-                let max_scrolls = if config.max_scrolls.is_empty() {
-                    None
-                } else {
-                    config.max_scrolls.parse().ok()
-                };
-
-                Self::log(&logs, format!("Max scrolls: {:?}, Scroll delay: {}ms, Overlap: {}px",
-                    max_scrolls.map(|n: usize| n.to_string()).unwrap_or("unlimited".to_string()),
-                    config.scroll_delay, config.overlap));
-
-                capture.capture_with_scroll_with_stop(
-                    config.overlap,
-                    max_scrolls,
-                    config.delay,
-                    config.scroll_key.as_str(),
-                    config.window_only,
-                    crop_option,
-                    config.scroll_delay,
-                    should_stop.clone(),
-                    logs.clone(),
-                )?
-            }
+        let max_scrolls = if config.max_scrolls.is_empty() {
+            None
+        } else {
+            config.max_scrolls.parse().ok()
         };
+
+        Self::log(&logs, format!("Max scrolls: {:?}, Scroll delay: {}ms, Overlap: {}px",
+            max_scrolls.map(|n: usize| n.to_string()).unwrap_or("unlimited".to_string()),
+            config.scroll_delay, config.overlap));
+
+        let result_image = capture.capture_with_scroll_with_stop(
+            config.overlap,
+            max_scrolls,
+            config.delay,
+            config.scroll_key.as_str(),
+            config.window_only,
+            crop_option,
+            config.scroll_delay,
+            should_stop.clone(),
+            logs.clone(),
+        )?;
 
         Self::log(&logs, "Saving image...".to_string());
 
@@ -398,7 +361,11 @@ impl eframe::App for CaptureApp {
                 ui.add_space(5.0);
 
                 let logs = self.logs.lock().unwrap();
-                let scroll_height = if logs.is_empty() { 50.0 } else { 150.0 };
+                let scroll_height = if logs.is_empty() {
+                    gui_const::LOG_HEIGHT_EMPTY
+                } else {
+                    gui_const::LOG_HEIGHT_WITH_CONTENT
+                };
 
                 egui::ScrollArea::vertical()
                     .max_height(scroll_height)
@@ -420,12 +387,7 @@ impl eframe::App for CaptureApp {
 
             // Configuration UI
             egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Capture Mode:");
-                    ui.radio_value(&mut self.config.capture_mode, CaptureMode::Video, "Video");
-                    ui.radio_value(&mut self.config.capture_mode, CaptureMode::Screenshot, "Screenshot");
-                });
-
+                ui.heading("Screenshot Mode");
                 ui.add_space(10.0);
 
                 // Common settings
@@ -439,12 +401,12 @@ impl eframe::App for CaptureApp {
 
                     ui.horizontal(|ui| {
                         ui.label("Overlap pixels:");
-                        ui.add(egui::Slider::new(&mut self.config.overlap, 50..=500));
+                        ui.add(egui::Slider::new(&mut self.config.overlap, gui_const::OVERLAP_MIN..=gui_const::OVERLAP_MAX));
                     });
 
                     ui.horizontal(|ui| {
                         ui.label("Delay before start (seconds):");
-                        ui.add(egui::Slider::new(&mut self.config.delay, 0..=10));
+                        ui.add(egui::Slider::new(&mut self.config.delay, gui_const::DELAY_MIN..=gui_const::DELAY_MAX));
                     });
 
                     ui.horizontal(|ui| {
@@ -457,39 +419,20 @@ impl eframe::App for CaptureApp {
 
                 ui.add_space(10.0);
 
-                // Mode-specific settings
-                match self.config.capture_mode {
-                    CaptureMode::Video => {
-                        ui.group(|ui| {
-                            ui.label("Video Mode Settings");
+                // Screenshot settings
+                ui.group(|ui| {
+                    ui.label("Screenshot Settings");
 
-                            ui.horizontal(|ui| {
-                                ui.label("Recording duration (seconds):");
-                                ui.add(egui::Slider::new(&mut self.config.video_duration, 5..=60));
-                            });
+                    ui.horizontal(|ui| {
+                        ui.label("Max scrolls (leave empty for unlimited):");
+                        ui.text_edit_singleline(&mut self.config.max_scrolls);
+                    });
 
-                            ui.horizontal(|ui| {
-                                ui.label("Frames per second:");
-                                ui.add(egui::Slider::new(&mut self.config.video_fps, 1..=10));
-                            });
-                        });
-                    }
-                    CaptureMode::Screenshot => {
-                        ui.group(|ui| {
-                            ui.label("Screenshot Mode Settings");
-
-                            ui.horizontal(|ui| {
-                                ui.label("Max scrolls (leave empty for unlimited):");
-                                ui.text_edit_singleline(&mut self.config.max_scrolls);
-                            });
-
-                            ui.horizontal(|ui| {
-                                ui.label("Scroll delay (milliseconds):");
-                                ui.add(egui::Slider::new(&mut self.config.scroll_delay, 100..=1000));
-                            });
-                        });
-                    }
-                }
+                    ui.horizontal(|ui| {
+                        ui.label("Scroll delay (milliseconds):");
+                        ui.add(egui::Slider::new(&mut self.config.scroll_delay, gui_const::SCROLL_DELAY_MIN..=gui_const::SCROLL_DELAY_MAX));
+                    });
+                });
 
                 ui.add_space(10.0);
 
@@ -650,19 +593,10 @@ impl CaptureApp {
         cmd.push(format!("--delay {}", self.config.delay));
         cmd.push(format!("--key {}", self.config.scroll_key.as_str()));
 
-        match self.config.capture_mode {
-            CaptureMode::Video => {
-                cmd.push("--video".to_string());
-                cmd.push(format!("--duration {}", self.config.video_duration));
-                cmd.push(format!("--fps {}", self.config.video_fps));
-            }
-            CaptureMode::Screenshot => {
-                if !self.config.max_scrolls.is_empty() {
-                    cmd.push(format!("--max-scrolls {}", self.config.max_scrolls));
-                }
-                cmd.push(format!("--scroll-delay {}", self.config.scroll_delay));
-            }
+        if !self.config.max_scrolls.is_empty() {
+            cmd.push(format!("--max-scrolls {}", self.config.max_scrolls));
         }
+        cmd.push(format!("--scroll-delay {}", self.config.scroll_delay));
 
         if self.config.window_only {
             cmd.push("--window-only".to_string());
@@ -683,8 +617,8 @@ impl CaptureApp {
 pub fn run_gui() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([600.0, 800.0])
-            .with_min_inner_size([500.0, 600.0]),
+            .with_inner_size([gui_const::WINDOW_WIDTH, gui_const::WINDOW_HEIGHT])
+            .with_min_inner_size([gui_const::MIN_WINDOW_WIDTH, gui_const::MIN_WINDOW_HEIGHT]),
         ..Default::default()
     };
 

@@ -1,5 +1,6 @@
 pub mod gui;
 pub mod presets;
+pub mod constants;
 
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, poll, read};
@@ -7,8 +8,8 @@ use enigo::{Enigo, Key, Keyboard, Settings};
 use image::{ImageBuffer, Rgba, RgbaImage};
 use std::thread;
 use std::time::Duration;
+use constants::{timing, similarity};
 
-// macOS-specific imports
 #[cfg(target_os = "macos")]
 use core_graphics::display::CGMainDisplayID;
 #[cfg(target_os = "macos")]
@@ -18,7 +19,6 @@ use core_graphics::image::CGImageRef;
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
-// Windows-specific imports
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect};
 
@@ -143,7 +143,7 @@ end tell
                 return Ok((x, y));
             }
 
-            thread::sleep(Duration::from_millis(100));
+            thread::sleep(Duration::from_millis(timing::MOUSE_POSITION_POLL_MS));
         }
     }
 
@@ -177,7 +177,7 @@ end tell
         if input.trim().to_lowercase() == "y" {
             println!("Enabling Magnifier...");
             Self::enable_zoom()?;
-            thread::sleep(Duration::from_millis(500));
+            thread::sleep(Duration::from_millis(timing::ZOOM_ENABLE_DELAY_MS));
         }
 
         println!();
@@ -360,7 +360,7 @@ end tell
         };
 
         enigo.key(key, enigo::Direction::Click)?;
-        thread::sleep(Duration::from_millis(500)); // Wait for content to load
+        thread::sleep(Duration::from_millis(timing::SCROLL_WAIT_MS)); // Wait for content to load
         Ok(())
     }
 
@@ -426,7 +426,7 @@ end tell
 
         let mut diff_count = 0;
         let total_pixels = (overlap_height * width) as usize;
-        let threshold = (total_pixels as f32 * 0.00) as usize;
+        let threshold = (total_pixels as f32 * similarity::DIFF_THRESHOLD_PERCENTAGE) as usize;
         println!("    [DEBUG] Total pixels to compare: {}, threshold: {}", total_pixels, threshold);
 
         for y in 0..overlap_height {
@@ -491,284 +491,12 @@ end tell
         result
     }
 
-    pub fn capture_with_video(
-        &self,
-        overlap: u32,
-        duration: u64,
-        delay: u64,
-        key_type: &str,
-        fps: u32,
-        window_only: bool,
-        crop: Option<String>,
-    ) -> Result<RgbaImage> {
-        self.capture_with_video_impl(overlap, duration, delay, key_type, fps, window_only, crop, false, None, None)
-    }
-
-    pub fn capture_with_video_no_input(
-        &self,
-        overlap: u32,
-        duration: u64,
-        delay: u64,
-        key_type: &str,
-        fps: u32,
-        window_only: bool,
-        crop: Option<String>,
-    ) -> Result<RgbaImage> {
-        self.capture_with_video_impl(overlap, duration, delay, key_type, fps, window_only, crop, true, None, None)
-    }
-
-    pub fn capture_with_video_with_stop(
-        &self,
-        overlap: u32,
-        duration: u64,
-        delay: u64,
-        key_type: &str,
-        fps: u32,
-        window_only: bool,
-        crop: Option<String>,
-        stop_flag: std::sync::Arc<std::sync::Mutex<bool>>,
-        logs: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-    ) -> Result<RgbaImage> {
-        self.capture_with_video_impl(overlap, duration, delay, key_type, fps, window_only, crop, true, Some(stop_flag), Some(logs))
-    }
-
     fn log_msg(logs: &Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>, msg: &str) {
         if let Some(logs) = logs {
             let timestamp = chrono::Local::now().format("%H:%M:%S");
             logs.lock().unwrap().push(format!("[{}] {}", timestamp, msg));
         }
         println!("{}", msg);
-    }
-
-    fn capture_with_video_impl(
-        &self,
-        overlap: u32,
-        duration: u64,
-        delay: u64,
-        key_type: &str,
-        fps: u32,
-        window_only: bool,
-        crop: Option<String>,
-        skip_input: bool,
-        stop_flag: Option<std::sync::Arc<std::sync::Mutex<bool>>>,
-        logs: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
-    ) -> Result<RgbaImage> {
-        Self::log_msg(&logs, &format!("Starting video-based scroll capture in {} seconds...", delay));
-        Self::log_msg(&logs, "Please focus on the window you want to capture!");
-        Self::log_msg(&logs, &format!("Video will be recorded for {} seconds", duration));
-        thread::sleep(Duration::from_secs(delay));
-
-        #[cfg(target_os = "macos")]
-        let video_file = "/tmp/scroll_capture_video.mov";
-        #[cfg(target_os = "macos")]
-        let frames_dir = "/tmp/scroll_capture_frames";
-
-        #[cfg(target_os = "windows")]
-        let video_file = std::env::temp_dir().join("scroll_capture_video.mp4");
-        #[cfg(target_os = "windows")]
-        let frames_dir = std::env::temp_dir().join("scroll_capture_frames");
-
-        #[cfg(target_os = "windows")]
-        let video_file = video_file.to_str().unwrap();
-        #[cfg(target_os = "windows")]
-        let frames_dir = frames_dir.to_str().unwrap();
-
-        // Clean up old files
-        let _ = std::fs::remove_file(video_file);
-        let _ = std::fs::remove_dir_all(frames_dir);
-        std::fs::create_dir_all(frames_dir)?;
-
-        // Determine crop region (manual crop takes precedence)
-        let crop_region: Option<(i32, i32, i32, i32)> = if let Some(crop_str) = crop {
-            // Manual crop region
-            if let Some((x, y, w, h)) = Self::parse_crop_region(&crop_str) {
-                Self::log_msg(&logs, &format!("Manual crop: {}x{} at ({}, {})", w, h, x, y));
-                Some((x, y, w, h))
-            } else {
-                Self::log_msg(&logs, "Invalid crop format, capturing full screen");
-                Self::log_msg(&logs, "   Use format: 'x,y,width,height' (e.g., '100,50,1920,1080')");
-                None
-            }
-        } else if window_only {
-            // Auto-detect focused window
-            if let Some((x, y, w, h)) = self.get_focused_window_bounds()? {
-                Self::log_msg(&logs, &format!("Focused window: {}x{} at ({}, {})", w, h, x, y));
-                Some((x, y, w, h))
-            } else {
-                Self::log_msg(&logs, "Could not detect focused window, capturing full screen");
-                None
-            }
-        } else {
-            None
-        };
-
-        Self::log_msg(&logs, "Starting video recording...");
-
-        // Start ffmpeg video recording in background with stdin for control
-        let mut cmd = std::process::Command::new("ffmpeg");
-
-        #[cfg(target_os = "macos")]
-        {
-            cmd.arg("-f").arg("avfoundation").arg("-i").arg("1:none"); // Screen 1, no audio
-
-            // Add crop filter for macOS
-            if let Some((x, y, w, h)) = crop_region {
-                cmd.arg("-vf").arg(format!("crop={}:{}:{}:{}", w, h, x, y));
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            cmd.arg("-f").arg("gdigrab").arg("-framerate").arg("30");
-
-            // Add offset and video_size for Windows (more efficient than crop filter)
-            if let Some((x, y, w, h)) = crop_region {
-                cmd.arg("-offset_x")
-                    .arg(x.to_string())
-                    .arg("-offset_y")
-                    .arg(y.to_string())
-                    .arg("-video_size")
-                    .arg(format!("{}x{}", w, h));
-            }
-
-            cmd.arg("-i").arg("desktop"); // Capture desktop
-        }
-
-        let mut ffmpeg_process = cmd
-            .arg("-t")
-            .arg(duration.to_string())
-            .arg("-y") // Overwrite output file
-            .arg(video_file)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("Failed to start ffmpeg: {}", e))?;
-
-        // Wait a bit for ffmpeg to start
-        thread::sleep(Duration::from_secs(2));
-
-        Self::log_msg(&logs, "Recording started, performing auto-scroll...");
-        if !skip_input {
-            println!("  Press 'Q' at any time to stop recording\n");
-        }
-
-        // Perform auto-scrolling with Q key detection
-        let end_time = std::time::Instant::now() + Duration::from_secs(duration - 2);
-        let mut _user_stopped = false;
-
-        while std::time::Instant::now() < end_time {
-            // Check stop flag
-            if let Some(ref flag) = stop_flag {
-                if *flag.lock().unwrap() {
-                    println!("\nStopped by user");
-                    _user_stopped = true;
-                    break;
-                }
-            }
-
-            self.scroll_down(key_type)?;
-
-            // Check for Q key to stop early (only in terminal mode)
-            if !skip_input {
-                if poll(Duration::from_millis(500))? {
-                    match read()? {
-                        Event::Key(KeyEvent {
-                            code: KeyCode::Char('q') | KeyCode::Char('Q'),
-                            ..
-                        }) => {
-                            println!("\nStopped by user");
-                            _user_stopped = true;
-                            break;
-                        }
-                        _ => {} // Ignore other keys
-                    }
-                }
-            } else {
-                // In GUI mode, just sleep
-                thread::sleep(Duration::from_millis(500));
-            }
-        }
-
-        // Clear any remaining events (only in terminal mode)
-        if !skip_input {
-            while poll(Duration::from_millis(0))? {
-                let _ = read();
-            }
-        }
-
-        Self::log_msg(&logs, "Stopping recording...");
-
-        // Send 'q' to ffmpeg stdin to stop gracefully
-        if let Some(mut stdin) = ffmpeg_process.stdin.take() {
-            use std::io::Write;
-            let _ = stdin.write_all(b"q");
-            let _ = stdin.flush();
-        }
-
-        let _ = ffmpeg_process.wait();
-
-        Self::log_msg(&logs, &format!("Video recorded to {}", video_file));
-        Self::log_msg(&logs, "Extracting frames from video...");
-
-        // Extract frames using ffmpeg
-        let output = std::process::Command::new("ffmpeg")
-            .arg("-i")
-            .arg(video_file)
-            .arg("-vf")
-            .arg(format!("fps={}", fps))
-            .arg(format!("{}/frame_%04d.png", frames_dir))
-            .output()
-            .map_err(|e| anyhow::anyhow!("Failed to extract frames: {}", e))?;
-
-        if !output.status.success() {
-            return Err(anyhow::anyhow!("Frame extraction failed"));
-        }
-
-        // Load all frames
-        let mut frame_paths: Vec<_> = std::fs::read_dir(frames_dir)?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("png"))
-            .collect();
-
-        frame_paths.sort();
-
-        if frame_paths.is_empty() {
-            return Err(anyhow::anyhow!("No frames extracted"));
-        }
-
-        Self::log_msg(&logs, &format!("Found {} frames to stitch", frame_paths.len()));
-        Self::log_msg(&logs, "Analyzing frames for duplicates...");
-
-        let mut images = Vec::new();
-        for (i, path) in frame_paths.iter().enumerate() {
-            let img = image::open(path)?.to_rgba8();
-
-            // Skip similar frames
-            if i > 0 {
-                let (is_similar, diff) =
-                    self.images_are_similar(&images.last().unwrap(), &img, overlap);
-                Self::log_msg(&logs, &format!("  Frame {} - diff: {:.1}%", i + 1, diff));
-                if !is_similar {
-                    images.push(img);
-                }
-            } else {
-                Self::log_msg(&logs, &format!("  Frame {} (first frame)", i + 1));
-                images.push(img);
-            }
-        }
-
-        Self::log_msg(&logs, &format!("Stitching {} unique frames...", images.len()));
-
-        let result = self.stitch_images(images, overlap);
-        Self::log_msg(&logs, &format!("Done! Final image: {}x{}", result.width(), result.height()));
-
-        // Clean up
-        let _ = std::fs::remove_file(video_file);
-        let _ = std::fs::remove_dir_all(frames_dir);
-
-        Ok(result)
     }
 
     pub fn capture_with_scroll(
@@ -912,11 +640,11 @@ end tell
             scroll_count += 1;
 
             // Small delay before next scroll
-            thread::sleep(Duration::from_millis(300));
+            thread::sleep(Duration::from_millis(timing::SMALL_DELAY_MS));
 
             // Check for user input to stop early (only in terminal mode)
             if !skip_input {
-                if poll(Duration::from_millis(500))? {
+                if poll(Duration::from_millis(timing::KEYBOARD_POLL_MS))? {
                     match read()? {
                         Event::Key(KeyEvent {
                             code: KeyCode::Char('q') | KeyCode::Char('Q'),
@@ -930,7 +658,7 @@ end tell
                 }
             } else {
                 // In GUI mode, just sleep
-                thread::sleep(Duration::from_millis(500));
+                thread::sleep(Duration::from_millis(timing::KEYBOARD_POLL_MS));
             }
         }
 

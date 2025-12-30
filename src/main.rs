@@ -10,7 +10,7 @@ struct Args {
     #[arg(long, help = "Launch GUI mode")]
     gui: bool,
 
-    #[arg(short, long, default_value = "scroll_capture.png")]
+    #[arg(short, long, default_value = "00.png")]
     output: String,
 
     #[arg(
@@ -36,24 +36,6 @@ struct Args {
         help = "Key to use for scrolling: space, down, pagedown"
     )]
     key: String,
-
-    // Video mode options
-    #[arg(long, help = "Use video recording mode (recommended)")]
-    video: bool,
-
-    #[arg(
-        long,
-        default_value_t = 10,
-        help = "Video recording duration in seconds"
-    )]
-    duration: u64,
-
-    #[arg(
-        long,
-        default_value_t = 2,
-        help = "Frames per second to extract from video"
-    )]
-    fps: u32,
 
     #[arg(long, help = "Capture only the focused window (not full screen)")]
     window_only: bool,
@@ -219,15 +201,15 @@ fn main() -> Result<()> {
         io::stdin().read_line(&mut input)?;
 
         if input.trim().to_lowercase() == "y" {
-            println!("\n🎬 Starting capture with selected region...\n");
-            let result_image = capture.capture_with_video(
+            println!("\n📸 Starting capture with selected region...\n");
+            let result_image = capture.capture_with_scroll(
                 args.overlap,
-                args.duration,
+                args.max_scrolls,
                 args.delay,
                 &args.key,
-                args.fps,
                 false, // Don't use window_only
                 Some(format!("{},{},{},{}", x, y, w, h)),
+                args.scroll_delay,
             )?;
 
             result_image.save(&args.output)?;
@@ -237,56 +219,31 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if args.video {
-        // Video recording mode
-        println!("🎬 VIDEO RECORDING MODE");
-        println!("Configuration:");
-        println!("  Output: {}", args.output);
-        println!("  Overlap: {} pixels", args.overlap);
-        println!("  Duration: {} seconds", args.duration);
-        println!("  FPS: {}", args.fps);
-        println!("  Scroll key: {}", args.key);
-        println!();
-
-        let result_image = capture.capture_with_video(
-            args.overlap,
-            args.duration,
-            args.delay,
-            &args.key,
-            args.fps,
-            args.window_only,
-            crop_value.clone(),
-        )?;
-
-        result_image.save(&args.output)?;
-        println!("\n💾 Saved to {}", args.output);
+    // Screenshot mode
+    println!("📸 SCREENSHOT MODE");
+    println!("Configuration:");
+    println!("  Output: {}", args.output);
+    println!("  Overlap: {} pixels", args.overlap);
+    if let Some(max) = args.max_scrolls {
+        println!("  Max scrolls: {}", max);
     } else {
-        // Screenshot mode
-        println!("📸 SCREENSHOT MODE");
-        println!("Configuration:");
-        println!("  Output: {}", args.output);
-        println!("  Overlap: {} pixels", args.overlap);
-        if let Some(max) = args.max_scrolls {
-            println!("  Max scrolls: {}", max);
-        } else {
-            println!("  Max scrolls: unlimited");
-        }
-        println!("  Scroll key: {}", args.key);
-        println!();
-
-        let result_image = capture.capture_with_scroll(
-            args.overlap,
-            args.max_scrolls,
-            args.delay,
-            &args.key,
-            args.window_only,
-            crop_value.clone(),
-            args.scroll_delay,
-        )?;
-
-        result_image.save(&args.output)?;
-        println!("Saved to {}", args.output);
+        println!("  Max scrolls: unlimited");
     }
+    println!("  Scroll key: {}", args.key);
+    println!();
+
+    let result_image = capture.capture_with_scroll(
+        args.overlap,
+        args.max_scrolls,
+        args.delay,
+        &args.key,
+        args.window_only,
+        crop_value.clone(),
+        args.scroll_delay,
+    )?;
+
+    result_image.save(&args.output)?;
+    println!("Saved to {}", args.output);
 
     Ok(())
 }
