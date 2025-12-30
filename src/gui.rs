@@ -615,21 +615,21 @@ impl CaptureApp {
             ui.add_space(5.0);
 
             let logs = self.logs.lock().unwrap();
-            let scroll_height = if logs.is_empty() {
-                gui_const::LOG_HEIGHT_EMPTY
-            } else {
-                gui_const::LOG_HEIGHT_WITH_CONTENT
-            };
+
+            // Use remaining available height, with a reasonable minimum
+            let available_height = ui.available_height();
+            let scroll_height = available_height.max(200.0);
 
             egui::ScrollArea::vertical()
                 .max_height(scroll_height)
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     if logs.is_empty() {
                         ui.label("No logs yet...");
                     } else {
                         for log in logs.iter() {
-                            ui.label(log);
+                            ui.label(egui::RichText::new(log).font(egui::FontId::monospace(12.0)));
                         }
                     }
                 });
