@@ -366,35 +366,7 @@ impl CaptureApp {
 impl eframe::App for CaptureApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Screen Scroll Capture Tool");
-            ui.add_space(10.0);
-
-            // Status display
-            let current_status = self.status.lock().unwrap().clone();
-            match &current_status {
-                CaptureStatus::Idle => {
-                    ui.label("Ready to capture");
-                }
-                CaptureStatus::Running(msg) => {
-                    let color = egui::Color32::from_rgb(
-                        self.config.status_color[0],
-                        self.config.status_color[1],
-                        self.config.status_color[2],
-                    );
-                    ui.colored_label(color, format!("⏳ {}", msg));
-                    ctx.request_repaint(); // Keep updating while running
-                }
-                CaptureStatus::Completed(msg) => {
-                    ui.colored_label(egui::Color32::GREEN, format!("✓ {}", msg));
-                }
-                CaptureStatus::Error(msg) => {
-                    ui.colored_label(egui::Color32::RED, format!("✗ {}", msg));
-                }
-            }
-
-            ui.add_space(10.0);
-
-            // Tab buttons
+            // Tab buttons at the top
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.current_tab, Tab::Capture, "📷 Capture");
                 ui.selectable_value(&mut self.current_tab, Tab::Settings, "⚙ Settings");
@@ -413,12 +385,37 @@ impl eframe::App for CaptureApp {
 }
 
 impl CaptureApp {
-    fn render_capture_tab(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+    fn render_capture_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         // Configuration UI
         ui.heading("Screenshot Mode");
         ui.add_space(10.0);
 
-        // Action buttons at the top
+        // Status display
+        let current_status = self.status.lock().unwrap().clone();
+        match &current_status {
+            CaptureStatus::Idle => {
+                ui.label("Ready to capture");
+            }
+            CaptureStatus::Running(msg) => {
+                let color = egui::Color32::from_rgb(
+                    self.config.status_color[0],
+                    self.config.status_color[1],
+                    self.config.status_color[2],
+                );
+                ui.colored_label(color, format!("⏳ {}", msg));
+                ctx.request_repaint(); // Keep updating while running
+            }
+            CaptureStatus::Completed(msg) => {
+                ui.colored_label(egui::Color32::GREEN, format!("✓ {}", msg));
+            }
+            CaptureStatus::Error(msg) => {
+                ui.colored_label(egui::Color32::RED, format!("✗ {}", msg));
+            }
+        }
+
+        ui.add_space(10.0);
+
+        // Action buttons
         let is_running = *self.is_running.lock().unwrap();
         ui.horizontal(|ui| {
             if ui
