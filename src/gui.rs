@@ -418,6 +418,28 @@ impl CaptureApp {
         ui.heading("Screenshot Mode");
         ui.add_space(10.0);
 
+        // Action buttons at the top
+        let is_running = *self.is_running.lock().unwrap();
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!is_running, egui::Button::new("▶ Start Capture"))
+                .clicked()
+            {
+                self.start_capture();
+            }
+
+            if ui
+                .add_enabled(is_running, egui::Button::new("⏹ Stop Capture"))
+                .clicked()
+            {
+                self.stop_capture();
+            }
+        });
+
+        ui.add_space(20.0);
+        ui.separator();
+        ui.add_space(10.0);
+
         // Common settings
         ui.group(|ui| {
             ui.label("Common Settings");
@@ -565,38 +587,24 @@ impl CaptureApp {
 
         ui.add_space(20.0);
 
-        // Action buttons
-        let is_running = *self.is_running.lock().unwrap();
-
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!is_running, egui::Button::new("▶ Start Capture"))
-                .clicked()
-            {
-                self.start_capture();
-            }
-
-            if ui
-                .add_enabled(is_running, egui::Button::new("⏹ Stop Capture"))
-                .clicked()
-            {
-                self.stop_capture();
-            }
-
-            if ui.button("📋 Copy Command").clicked() {
-                let cmd = self.generate_cli_command();
-                ui.ctx().copy_text(cmd);
-            }
-        });
-
-        ui.add_space(10.0);
-
         // Show equivalent CLI command
         ui.group(|ui| {
-            ui.label("Equivalent CLI command:");
+            ui.horizontal(|ui| {
+                ui.label("Equivalent CLI command:");
+                if ui.button("📋 Copy").clicked() {
+                    let cmd = self.generate_cli_command();
+                    ui.ctx().copy_text(cmd);
+                }
+            });
+
             ui.add_space(5.0);
             let cmd = self.generate_cli_command();
-            ui.code(&cmd);
+
+            ui.add(
+                egui::TextEdit::multiline(&mut cmd.as_str())
+                    .code_editor()
+                    .desired_width(f32::INFINITY)
+            );
         });
 
         ui.add_space(20.0);
