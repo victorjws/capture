@@ -254,7 +254,7 @@ impl CaptureApp {
     }
 
     fn log(logs: &Arc<Mutex<Vec<String>>>, message: String) {
-        let timestamp = chrono::Local::now().format("%H:%M:%S");
+        let timestamp = chrono::Local::now().format("%H:%M:%S%.6f");
         let log_entry = format!("[{}] {}", timestamp, message);
         logs.lock().unwrap().push(log_entry);
     }
@@ -396,7 +396,8 @@ impl eframe::App for CaptureApp {
 
                     ui.horizontal(|ui| {
                         ui.label("Output file:");
-                        ui.text_edit_singleline(&mut self.config.output_path);
+                        ui.add(egui::TextEdit::singleline(&mut self.config.output_path)
+                            .desired_width(ui.available_width()));
                     });
 
                     ui.horizontal(|ui| {
@@ -425,7 +426,8 @@ impl eframe::App for CaptureApp {
 
                     ui.horizontal(|ui| {
                         ui.label("Max scrolls (leave empty for unlimited):");
-                        ui.text_edit_singleline(&mut self.config.max_scrolls);
+                        ui.add(egui::TextEdit::singleline(&mut self.config.max_scrolls)
+                            .desired_width(ui.available_width()));
                     });
 
                     ui.horizontal(|ui| {
@@ -520,7 +522,8 @@ impl eframe::App for CaptureApp {
 
                     ui.horizontal(|ui| {
                         ui.label("Font file:");
-                        ui.text_edit_singleline(&mut self.config.font_path);
+                        ui.add(egui::TextEdit::singleline(&mut self.config.font_path)
+                            .desired_width(ui.available_width() - 80.0)); // Reserve space for Browse button
 
                         if ui.button("Browse...").clicked() {
                             if let Some(path) = rfd::FileDialog::new()
