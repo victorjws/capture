@@ -450,7 +450,7 @@ end tell
 
     fn log_msg(logs: &Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>, msg: &str) {
         if let Some(logs) = logs {
-            let timestamp = chrono::Local::now().format("%H:%M:%S");
+            let timestamp = chrono::Local::now().format("%H:%M:%S%.6f");
             logs.lock()
                 .unwrap()
                 .push(format!("[{}] {}", timestamp, msg));
