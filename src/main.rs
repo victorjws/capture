@@ -1,6 +1,6 @@
 use anyhow::Result;
-use capture::ScreenCapture;
 use capture::presets;
+use capture::{ScreenCapture, build_output_path, validate_format};
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -10,8 +10,16 @@ struct Args {
     #[arg(long, help = "Launch GUI mode")]
     gui: bool,
 
-    #[arg(short, long, default_value = "00.png")]
+    #[arg(short, long, default_value = "00")]
     output: String,
+
+    #[arg(
+        short,
+        long,
+        default_value = "png",
+        help = "Output format: png, jpg, jpeg, gif, bmp, tiff, tif, webp"
+    )]
+    format: String,
 
     #[arg(
         short = 'p',
@@ -166,6 +174,12 @@ fn main() -> Result<()> {
         return save_preset_from_string(preset_str);
     }
 
+    // Validate format before starting capture
+    validate_format(&args.format)?;
+
+    // Build full output path
+    let output_path = build_output_path(&args.output, &args.format);
+
     let capture = ScreenCapture::new();
 
     // Resolve crop value (preset takes precedence if both are specified)
@@ -211,8 +225,8 @@ fn main() -> Result<()> {
                 args.scroll_delay,
             )?;
 
-            result_image.save(&args.output)?;
-            println!("\n💾 Saved to {}", args.output);
+            result_image.save(&output_path)?;
+            println!("\n💾 Saved to {}", output_path);
         }
 
         return Ok(());
@@ -221,7 +235,7 @@ fn main() -> Result<()> {
     // Screenshot mode
     println!("📸 SCREENSHOT MODE");
     println!("Configuration:");
-    println!("  Output: {}", args.output);
+    println!("  Output: {}", output_path);
     println!("  Overlap: {} pixels", args.overlap);
     if let Some(max) = args.max_scrolls {
         println!("  Max scrolls: {}", max);
@@ -241,8 +255,8 @@ fn main() -> Result<()> {
         args.scroll_delay,
     )?;
 
-    result_image.save(&args.output)?;
-    println!("Saved to {}", args.output);
+    result_image.save(&output_path)?;
+    println!("Saved to {}", output_path);
 
     Ok(())
 }

@@ -23,7 +23,8 @@ impl ScrollKey {
 
 #[derive(Clone)]
 struct CaptureConfig {
-    output_path: String,
+    output_filename: String, // Filename without extension
+    output_format: String,   // File format (png, jpg, etc.)
     overlap: u32,
     delay: u64,
     scroll_key: ScrollKey,
@@ -52,7 +53,8 @@ struct CaptureConfig {
 impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
-            output_path: defaults::OUTPUT_PATH.to_string(),
+            output_filename: "00".to_string(), // Just the filename without extension
+            output_format: "png".to_string(),  // Default format
             overlap: defaults::OVERLAP,
             delay: defaults::DELAY,
             scroll_key: ScrollKey::Space,
@@ -226,6 +228,12 @@ impl CaptureApp {
     }
 
     fn start_capture(&mut self) {
+        // Validate output format before starting
+        if let Err(e) = crate::validate_format(&self.config.output_format) {
+            *self.status.lock().unwrap() = CaptureStatus::Error(format!("{}", e));
+            return;
+        }
+
         let config = self.config.clone();
         let status = Arc::clone(&self.status);
         let is_running = Arc::clone(&self.is_running);
@@ -358,8 +366,10 @@ impl CaptureApp {
 
         *status.lock().unwrap() = CaptureStatus::Running("Saving image...".to_string());
 
-        result_image.save(&config.output_path)?;
-        Ok(config.output_path.clone())
+        // Build full output path with format
+        let output_path = crate::build_output_path(&config.output_filename, &config.output_format);
+        result_image.save(&output_path)?;
+        Ok(output_path)
     }
 }
 
@@ -442,11 +452,26 @@ impl CaptureApp {
             ui.label("Common Settings");
 
             ui.horizontal(|ui| {
-                ui.label("Output file:");
+                ui.label("Output filename:");
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.config.output_path)
-                        .desired_width(ui.available_width()),
+                    egui::TextEdit::singleline(&mut self.config.output_filename)
+                        .hint_text("Enter filename without extension")
+                        .desired_width(ui.available_width() * 0.6),
                 );
+
+                ui.label("Format:");
+                egui::ComboBox::from_id_salt("format_selector")
+                    .selected_text(&self.config.output_format)
+                    .width(100.0)
+                    .show_ui(ui, |ui| {
+                        for format in crate::SUPPORTED_FORMATS {
+                            ui.selectable_value(
+                                &mut self.config.output_format,
+                                format.to_string(),
+                                *format,
+                            );
+                        }
+                    });
             });
 
             ui.horizontal(|ui| {
@@ -600,7 +625,7 @@ impl CaptureApp {
             ui.add(
                 egui::TextEdit::multiline(&mut cmd.as_str())
                     .code_editor()
-                    .desired_width(f32::INFINITY)
+                    .desired_width(f32::INFINITY),
             );
         });
 
@@ -741,7 +766,8 @@ impl CaptureApp {
     fn generate_cli_command(&self) -> String {
         let mut cmd = vec!["capture".to_string()];
 
-        cmd.push(format!("--output {}", self.config.output_path));
+        cmd.push(format!("--output {}", self.config.output_filename));
+        cmd.push(format!("--format {}", self.config.output_format));
         cmd.push(format!("--overlap {}", self.config.overlap));
         cmd.push(format!("--delay {}", self.config.delay));
         cmd.push(format!("--key {}", self.config.scroll_key.as_str()));

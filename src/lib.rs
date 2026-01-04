@@ -22,6 +22,30 @@ use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect};
 
+pub const SUPPORTED_FORMATS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "webp"];
+
+/// Validates that the format is supported
+pub fn validate_format(format: &str) -> Result<()> {
+    let format_lower = format.to_lowercase();
+    let format_clean = format_lower.trim_start_matches('.');
+
+    if SUPPORTED_FORMATS.contains(&format_clean) {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "Unsupported file format: '{}'\nSupported formats: {}",
+            format,
+            SUPPORTED_FORMATS.join(", ")
+        ))
+    }
+}
+
+/// Builds the full output path from filename and format
+pub fn build_output_path(filename: &str, format: &str) -> String {
+    let format_clean = format.trim_start_matches('.').to_lowercase();
+    format!("{}.{}", filename, format_clean)
+}
+
 pub struct ScreenCapture {
     #[cfg(target_os = "macos")]
     display_id: u32,
