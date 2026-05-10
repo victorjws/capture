@@ -433,19 +433,70 @@ end tell
         true
     }
 
-    fn stitch_images(&self, images: Vec<RgbaImage>, overlap: u32) -> RgbaImage {
+    fn detect_actual_overlap(img_prev: &RgbaImage, img_last: &RgbaImage, min_overlap: u32) -> u32 {
+        let height = img_prev.height();
+        let width = img_prev.width();
+
+        // Find the first non-uniform row in img_last to use as anchor.
+        // Blank rows (all same color) are skipped to avoid false positives in webtoons.
+        let anchor_y = (0..min_overlap)
+            .find(|&y| {
+                let first = img_last.get_pixel(0, y).0;
+                (1..width).any(|x| img_last.get_pixel(x, y).0 != first)
+            })
+            .unwrap_or(0);
+
+        // Build a fingerprint for a block of rows starting at anchor_y.
+        let block_size = 20u32.min(height.saturating_sub(anchor_y));
+        let fingerprint: Vec<Vec<_>> = (anchor_y..anchor_y + block_size)
+            .map(|y| (0..width).map(|x| *img_last.get_pixel(x, y)).collect())
+            .collect();
+
+        let search_limit = height.saturating_sub(min_overlap);
+
+        for prev_y in (0..=search_limit).rev() {
+            let prev_anchor_y = prev_y + anchor_y;
+            if prev_anchor_y + block_size > height {
+                continue;
+            }
+
+            let first_row_matches = fingerprint[0]
+                .iter()
+                .enumerate()
+                .all(|(x, &pix)| *img_prev.get_pixel(x as u32, prev_anchor_y) == pix);
+
+            if first_row_matches {
+                let block_matches = (0..block_size).all(|dy| {
+                    fingerprint[dy as usize]
+                        .iter()
+                        .enumerate()
+                        .all(|(x, &pix)| *img_prev.get_pixel(x as u32, prev_anchor_y + dy) == pix)
+                });
+
+                if block_matches {
+                    return height - prev_y;
+                }
+            }
+        }
+
+        min_overlap
+    }
+
+    fn stitch_images(&self, images: Vec<RgbaImage>, overlaps: &[u32]) -> RgbaImage {
         if images.is_empty() {
             return ImageBuffer::new(1, 1);
         }
 
         let width = images[0].width();
         let single_height = images[0].height();
-        let total_height = single_height + (images.len() as u32 - 1) * (single_height - overlap);
+        let step_sum: u32 = overlaps.iter().map(|&o| single_height - o).sum();
+        let total_height = single_height + step_sum;
 
         let mut result = ImageBuffer::new(width, total_height);
 
+        let mut y_offset = 0u32;
         for (i, img) in images.iter().enumerate() {
-            let y_offset = i as u32 * (single_height - overlap);
+            let overlap = if i > 0 { overlaps[i - 1] } else { 0 };
 
             for y in 0..single_height {
                 for x in 0..width {
@@ -466,6 +517,10 @@ end tell
                         }
                     }
                 }
+            }
+
+            if i < overlaps.len() {
+                y_offset += single_height - overlaps[i];
             }
         }
 
@@ -740,13 +795,133 @@ end tell
             }
         }
 
+        // Build per-transition overlaps. The last transition is detected from pixels
+        // because the final scroll may be shorter than a full page.
+        let mut overlaps = vec![overlap; images.len().saturating_sub(1)];
+        if images.len() >= 2 {
+            let actual_last = Self::detect_actual_overlap(
+                &images[images.len() - 2],
+                &images[images.len() - 1],
+                overlap,
+            );
+            if let Some(last) = overlaps.last_mut() {
+                *last = actual_last;
+            }
+            Self::log_msg(
+                &logs,
+                &format!(
+                    "Last frame overlap: {}px (fixed: {}px)",
+                    actual_last, overlap
+                ),
+            );
+        }
+
         Self::log_msg(&logs, &format!("Stitching {} images...", images.len()));
-        let result = self.stitch_images(images, overlap);
+        let result = self.stitch_images(images, &overlaps);
         Self::log_msg(
             &logs,
             &format!("Done! Final image: {}x{}", result.width(), result.height()),
         );
 
         Ok(result)
+    }
+
+    fn extract_rows(img: &RgbaImage, start_y: u32, height: u32) -> RgbaImage {
+        let width = img.width();
+        let mut out: RgbaImage = ImageBuffer::new(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                out.put_pixel(x, y, *img.get_pixel(x, start_y + y));
+            }
+        }
+        out
+    }
+
+    pub fn extract_fix_debug_frames(
+        img: &RgbaImage,
+        screen_height: u32,
+        overlap: u32,
+    ) -> Option<(RgbaImage, RgbaImage)> {
+        let total_h = img.height();
+        if total_h < 2 * screen_height || screen_height <= overlap {
+            return None;
+        }
+        let actual_height = screen_height - overlap;
+        let last_start = total_h - screen_height;
+        let prev_start = last_start - actual_height;
+        Some((
+            Self::extract_rows(img, prev_start, actual_height),
+            Self::extract_rows(img, last_start, actual_height),
+        ))
+    }
+
+    /// Fixes overlap artifacts in an already-stitched image caused by a short final scroll.
+    ///
+    /// Extracts the last two frame-sized slices from the image, runs `detect_actual_overlap`
+    /// (the same logic used during capture), and trims the excess rows.
+    ///
+    /// Returns `Some(fixed)` when overlap was detected and corrected, `None` otherwise.
+    pub fn fix_stitched_overlap(
+        img: &RgbaImage,
+        screen_height: u32,
+        overlap: u32,
+    ) -> Option<RgbaImage> {
+        let total_h = img.height();
+        let width = img.width();
+
+        if total_h < 2 * screen_height || screen_height <= overlap {
+            return None;
+        }
+
+        // Reconstruct the last two captured frames from their positions in the stitched image.
+        // The last transition step may be shorter than the nominal step when the final scroll
+        // was short, so compute it via modulo rather than assuming a full step.
+        let actual_height = screen_height - overlap;
+        let last_start = total_h - actual_height;
+        let prev_start = total_h - (actual_height * 2);
+
+        let img_prev = Self::extract_rows(img, prev_start, actual_height);
+        let img_last = Self::extract_rows(img, last_start, actual_height);
+
+        let actual_overlap = Self::detect_actual_overlap(&img_prev, &img_last, overlap);
+
+        if actual_overlap <= overlap {
+            return None;
+        }
+
+        let skip_amount = actual_overlap - overlap;
+
+        // In the correct stitch, img[n-1] would be placed at:
+        //   y_offset_correct = last_start - skip_amount
+        // The blend midpoint (where prev frame gives way to current frame) is at:
+        //   cut_row = y_offset_correct + actual_overlap / 2
+        let y_offset_correct = last_start.saturating_sub(skip_amount);
+        let cut_row = y_offset_correct + actual_overlap / 2;
+
+        if cut_row + skip_amount > total_h {
+            return None;
+        }
+
+        println!(
+            "Overlap detected: actual {}px vs configured {}px — removing {} rows at row {}",
+            actual_overlap, overlap, skip_amount, cut_row
+        );
+
+        let new_total_h = total_h - skip_amount;
+        let mut result: RgbaImage = ImageBuffer::new(width, new_total_h);
+
+        for y in 0..cut_row {
+            for x in 0..width {
+                result.put_pixel(x, y, *img.get_pixel(x, y));
+            }
+        }
+        for y in (cut_row + skip_amount)..total_h {
+            let dest_y = y - skip_amount;
+            for x in 0..width {
+                result.put_pixel(x, dest_y, *img.get_pixel(x, y));
+            }
+        }
+
+        Some(result)
     }
 }

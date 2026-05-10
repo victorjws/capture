@@ -48,6 +48,11 @@ struct CaptureConfig {
 
     // UI settings
     status_color: [u8; 3], // RGB color values
+
+    // Fix mode settings
+    fix_input_path: String,
+    fix_screen_height: u32,
+    fix_output_filename: String,
 }
 
 impl Default for CaptureConfig {
@@ -70,6 +75,9 @@ impl Default for CaptureConfig {
             crop_height: defaults::CROP_HEIGHT,
             font_path: String::new(),
             status_color: [255, 255, 0], // Yellow by default
+            fix_input_path: String::new(),
+            fix_screen_height: 1007,
+            fix_output_filename: String::new(),
         }
     }
 }
@@ -85,6 +93,7 @@ enum CaptureStatus {
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
     Capture,
+    Fix,
     Settings,
 }
 
@@ -379,6 +388,7 @@ impl eframe::App for CaptureApp {
             // Tab buttons at the top
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.current_tab, Tab::Capture, "📷 Capture");
+                ui.selectable_value(&mut self.current_tab, Tab::Fix, "🔧 Fix");
                 ui.selectable_value(&mut self.current_tab, Tab::Settings, "⚙ Settings");
             });
 
@@ -388,6 +398,7 @@ impl eframe::App for CaptureApp {
             // Tab content
             egui::ScrollArea::vertical().show(ui, |ui| match self.current_tab {
                 Tab::Capture => self.render_capture_tab(ui, ctx),
+                Tab::Fix => self.render_fix_tab(ui, ctx),
                 Tab::Settings => self.render_settings_tab(ui, ctx),
             });
         });
@@ -758,6 +769,207 @@ impl CaptureApp {
                     self.config.status_color = [0, 255, 0];
                 }
             });
+        });
+    }
+}
+
+impl CaptureApp {
+    fn start_fix(&mut self) {
+        if self.config.fix_input_path.is_empty() {
+            *self.status.lock().unwrap() =
+                CaptureStatus::Error("No input file selected.".to_string());
+            return;
+        }
+
+        let input_path = self.config.fix_input_path.clone();
+        let screen_height = self.config.fix_screen_height;
+        let overlap = self.config.overlap;
+        let output_format = self.config.output_format.clone();
+        let fix_output = self.config.fix_output_filename.clone();
+
+        let status = Arc::clone(&self.status);
+        let is_running = Arc::clone(&self.is_running);
+        let logs = Arc::clone(&self.logs);
+
+        *is_running.lock().unwrap() = true;
+        *status.lock().unwrap() = CaptureStatus::Running("Loading image...".to_string());
+        logs.lock().unwrap().clear();
+
+        thread::spawn(move || {
+            let result = (|| -> anyhow::Result<String> {
+                use crate::ScreenCapture;
+
+                let img = image::open(&input_path)
+                    .map_err(|e| anyhow::anyhow!("Failed to open image: {}", e))?
+                    .to_rgba8();
+
+                Self::log(
+                    &logs,
+                    format!("Loaded: {} ({}x{})", input_path, img.width(), img.height()),
+                );
+                *status.lock().unwrap() =
+                    CaptureStatus::Running("Detecting overlap...".to_string());
+
+                if let Some((prev_frame, last_frame)) =
+                    ScreenCapture::extract_fix_debug_frames(&img, screen_height, overlap)
+                {
+                    let stem = std::path::Path::new(&input_path)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("debug");
+                    let prev_path = crate::build_output_path(&format!("{}_debug_prev", stem), &output_format);
+                    let last_path = crate::build_output_path(&format!("{}_debug_last", stem), &output_format);
+                    prev_frame.save(&prev_path)?;
+                    last_frame.save(&last_path)?;
+                    Self::log(&logs, format!("Debug frames: {} / {}", prev_path, last_path));
+                }
+
+                match ScreenCapture::fix_stitched_overlap(&img, screen_height, overlap) {
+                    Some(fixed) => {
+                        let output_path = if fix_output.is_empty() {
+                            let stem = std::path::Path::new(&input_path)
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("fixed");
+                            crate::build_output_path(&format!("{}_fixed", stem), &output_format)
+                        } else {
+                            crate::build_output_path(&fix_output, &output_format)
+                        };
+
+                        *status.lock().unwrap() =
+                            CaptureStatus::Running("Saving...".to_string());
+                        fixed.save(&output_path)?;
+                        Self::log(&logs, format!("Saved: {}", output_path));
+                        Ok(output_path)
+                    }
+                    None => {
+                        Self::log(&logs, "No overlap detected — image looks correct.".to_string());
+                        Err(anyhow::anyhow!("No overlap found"))
+                    }
+                }
+            })();
+
+            *is_running.lock().unwrap() = false;
+            match result {
+                Ok(path) => {
+                    *status.lock().unwrap() =
+                        CaptureStatus::Completed(format!("Saved to: {}", path));
+                }
+                Err(e) if e.to_string() == "No overlap found" => {
+                    *status.lock().unwrap() =
+                        CaptureStatus::Completed("No overlap detected — image looks correct.".to_string());
+                }
+                Err(e) => {
+                    *status.lock().unwrap() = CaptureStatus::Error(format!("{}", e));
+                }
+            }
+        });
+    }
+
+    fn render_fix_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.heading("Fix Overlap");
+        ui.add_space(10.0);
+
+        // Status display (reuse capture status)
+        let current_status = self.status.lock().unwrap().clone();
+        match &current_status {
+            CaptureStatus::Idle => {
+                ui.label("Select a stitched image to fix.");
+            }
+            CaptureStatus::Running(msg) => {
+                let color = egui::Color32::from_rgb(
+                    self.config.status_color[0],
+                    self.config.status_color[1],
+                    self.config.status_color[2],
+                );
+                ui.colored_label(color, format!("⏳ {}", msg));
+                ctx.request_repaint();
+            }
+            CaptureStatus::Completed(msg) => {
+                ui.colored_label(egui::Color32::GREEN, format!("✓ {}", msg));
+            }
+            CaptureStatus::Error(msg) => {
+                ui.colored_label(egui::Color32::RED, format!("✗ {}", msg));
+            }
+        }
+
+        ui.add_space(10.0);
+
+        let is_running = *self.is_running.lock().unwrap();
+
+        ui.group(|ui| {
+            // Input file
+            ui.horizontal(|ui| {
+                ui.label("Input image:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.config.fix_input_path)
+                        .hint_text("Path to stitched image")
+                        .desired_width(ui.available_width() - 90.0),
+                );
+                if ui.button("Browse...").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "tiff"])
+                        .pick_file()
+                    {
+                        if let Some(s) = path.to_str() {
+                            self.config.fix_input_path = s.to_string();
+                        }
+                    }
+                }
+            });
+
+            // Output file (optional)
+            ui.horizontal(|ui| {
+                ui.label("Output filename:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.config.fix_output_filename)
+                        .hint_text("Leave empty to auto-generate (<name>_fixed)")
+                        .desired_width(ui.available_width()),
+                );
+            });
+
+            ui.add_space(5.0);
+
+            // Screen height + overlap
+            ui.horizontal(|ui| {
+                ui.label("Screen height (px):");
+                ui.add(egui::DragValue::new(&mut self.config.fix_screen_height).speed(1.0));
+
+                ui.add_space(20.0);
+                ui.label("Overlap (px):");
+                ui.add(egui::DragValue::new(&mut self.config.overlap).speed(1.0));
+            });
+        });
+
+        ui.add_space(10.0);
+
+        if ui
+            .add_enabled(!is_running, egui::Button::new("🔧 Fix Image"))
+            .clicked()
+        {
+            self.start_fix();
+        }
+
+        ui.add_space(20.0);
+
+        // Log
+        ui.group(|ui| {
+            ui.label("Log");
+            ui.add_space(5.0);
+            let logs = self.logs.lock().unwrap();
+            egui::ScrollArea::vertical()
+                .max_height(200.0)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    if logs.is_empty() {
+                        ui.label("No logs yet...");
+                    } else {
+                        for log in logs.iter() {
+                            ui.label(egui::RichText::new(log).font(egui::FontId::monospace(12.0)));
+                        }
+                    }
+                });
         });
     }
 }

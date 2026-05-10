@@ -16,26 +16,25 @@ name = "capture-gui"
 path = "src/bin/capture-gui.rs"
 
 [dependencies]
-image = "0.25"
-enigo = "0.6.1"
-anyhow = "1.0"
-clap = { version = "4.5", features = ["derive"] }
-crossterm = "0.29.0"
-screenshots = "0.8"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-eframe = "0.31"
-egui = "0.31"
-chrono = "0.4"
-rfd = "0.15"
+image = "0"
+enigo = "0"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0"
+screenshots = "0"
+serde_json = "1"
+eframe = "0"
+egui = "0"
+chrono = "0"
+rfd = "0"
 
 # Platform-specific dependencies
 [target.'cfg(target_os = "macos")'.dependencies]
-core-graphics = "0.25.0"
-core-foundation = "0.10.1"
+core-graphics = "0"
+core-foundation = "0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.62.2", features = [
+windows = { version = "0", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",

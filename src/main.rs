@@ -86,6 +86,15 @@ struct Args {
         help = "Delay in milliseconds after scrolling before capturing (screenshot mode only)"
     )]
     scroll_delay: u64,
+
+    #[arg(long, help = "Fix overlap artifacts in an existing stitched image")]
+    fix: Option<String>,
+
+    #[arg(
+        long,
+        help = "Height of each captured frame in pixels, required when using --fix"
+    )]
+    screen_height: Option<u32>,
 }
 
 fn list_presets() -> Result<()> {
@@ -161,6 +170,53 @@ fn main() -> Result<()> {
     // Launch GUI mode if requested
     if args.gui {
         capture::gui::run_gui().map_err(|e| anyhow::anyhow!("GUI error: {:?}", e))?;
+        return Ok(());
+    }
+
+    // Handle --fix
+    if let Some(fix_path) = &args.fix {
+        let screen_height = args.screen_height.ok_or_else(|| {
+            anyhow::anyhow!("--screen-height is required when using --fix (e.g., --screen-height 1080)")
+        })?;
+
+        let img = image::open(fix_path)
+            .map_err(|e| anyhow::anyhow!("Failed to open {}: {}", fix_path, e))?
+            .to_rgba8();
+
+        println!("Fixing: {} ({}x{})", fix_path, img.width(), img.height());
+
+        if let Some((prev_frame, last_frame)) =
+            ScreenCapture::extract_fix_debug_frames(&img, screen_height, args.overlap)
+        {
+            let stem = std::path::Path::new(fix_path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("debug");
+            let prev_path = build_output_path(&format!("{}_debug_prev", stem), &args.format);
+            let last_path = build_output_path(&format!("{}_debug_last", stem), &args.format);
+            prev_frame.save(&prev_path)?;
+            last_frame.save(&last_path)?;
+            println!("Debug frames: {} / {}", prev_path, last_path);
+        }
+
+        match ScreenCapture::fix_stitched_overlap(&img, screen_height, args.overlap) {
+            Some(fixed) => {
+                let output_path = if args.output == "00" {
+                    let stem = std::path::Path::new(fix_path)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("fixed");
+                    build_output_path(&format!("{}_fixed", stem), &args.format)
+                } else {
+                    build_output_path(&args.output, &args.format)
+                };
+                fixed.save(&output_path)?;
+                println!("Saved to {}", output_path);
+            }
+            None => {
+                println!("No overlap detected — image looks correct.");
+            }
+        }
         return Ok(());
     }
 
