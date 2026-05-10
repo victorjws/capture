@@ -810,20 +810,6 @@ impl CaptureApp {
                 *status.lock().unwrap() =
                     CaptureStatus::Running("Detecting overlap...".to_string());
 
-                if let Some((prev_frame, last_frame)) =
-                    ScreenCapture::extract_fix_debug_frames(&img, screen_height, overlap)
-                {
-                    let stem = std::path::Path::new(&input_path)
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("debug");
-                    let prev_path = crate::build_output_path(&format!("{}_debug_prev", stem), &output_format);
-                    let last_path = crate::build_output_path(&format!("{}_debug_last", stem), &output_format);
-                    prev_frame.save(&prev_path)?;
-                    last_frame.save(&last_path)?;
-                    Self::log(&logs, format!("Debug frames: {} / {}", prev_path, last_path));
-                }
-
                 match ScreenCapture::fix_stitched_overlap(&img, screen_height, overlap) {
                     Some(fixed) => {
                         let output_path = if fix_output.is_empty() {

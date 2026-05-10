@@ -176,7 +176,9 @@ fn main() -> Result<()> {
     // Handle --fix
     if let Some(fix_path) = &args.fix {
         let screen_height = args.screen_height.ok_or_else(|| {
-            anyhow::anyhow!("--screen-height is required when using --fix (e.g., --screen-height 1080)")
+            anyhow::anyhow!(
+                "--screen-height is required when using --fix (e.g., --screen-height 1080)"
+            )
         })?;
 
         let img = image::open(fix_path)
@@ -184,20 +186,6 @@ fn main() -> Result<()> {
             .to_rgba8();
 
         println!("Fixing: {} ({}x{})", fix_path, img.width(), img.height());
-
-        if let Some((prev_frame, last_frame)) =
-            ScreenCapture::extract_fix_debug_frames(&img, screen_height, args.overlap)
-        {
-            let stem = std::path::Path::new(fix_path)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("debug");
-            let prev_path = build_output_path(&format!("{}_debug_prev", stem), &args.format);
-            let last_path = build_output_path(&format!("{}_debug_last", stem), &args.format);
-            prev_frame.save(&prev_path)?;
-            last_frame.save(&last_path)?;
-            println!("Debug frames: {} / {}", prev_path, last_path);
-        }
 
         match ScreenCapture::fix_stitched_overlap(&img, screen_height, args.overlap) {
             Some(fixed) => {

@@ -10,11 +10,6 @@ use image::{ImageBuffer, Rgba, RgbaImage};
 use std::thread;
 use std::time::Duration;
 
-#[cfg(target_os = "macos")]
-use core_graphics::display::CGMainDisplayID;
-#[cfg(target_os = "macos")]
-use core_graphics::image::CGImageRef;
-
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::{POINT, RECT};
 #[cfg(target_os = "windows")]
@@ -47,8 +42,6 @@ pub fn build_output_path(filename: &str, format: &str) -> String {
 }
 
 pub struct ScreenCapture {
-    #[cfg(target_os = "macos")]
-    display_id: u32,
     #[cfg(target_os = "windows")]
     _phantom: (),
 }
@@ -56,23 +49,8 @@ pub struct ScreenCapture {
 impl ScreenCapture {
     pub fn new() -> Self {
         Self {
-            #[cfg(target_os = "macos")]
-            display_id: unsafe { CGMainDisplayID() },
             #[cfg(target_os = "windows")]
             _phantom: (),
-        }
-    }
-
-    pub fn parse_crop_region(crop_str: &str) -> Option<(i32, i32, i32, i32)> {
-        let parts: Vec<i32> = crop_str
-            .split(|c| c == ',' || c == ':' || c == ' ')
-            .filter_map(|s| s.trim().parse().ok())
-            .collect();
-
-        if parts.len() == 4 && parts[2] > 0 && parts[3] > 0 {
-            Some((parts[0], parts[1], parts[2], parts[3]))
-        } else {
-            None
         }
     }
 
@@ -148,7 +126,7 @@ end tell
         // Show live coordinates until Enter is pressed
         let (tx, rx) = std::sync::mpsc::channel();
 
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             let mut input = String::new();
             let _ = io::stdin().read_line(&mut input);
             let _ = tx.send(());
@@ -343,34 +321,6 @@ end tell
         }
 
         Ok(rgba_image)
-    }
-
-    #[cfg(target_os = "macos")]
-    fn cgimage_to_rgba(cg_image: &CGImageRef) -> RgbaImage {
-        let width = cg_image.width() as u32;
-        let height = cg_image.height() as u32;
-        let bytes_per_row = cg_image.bytes_per_row();
-        let data = cg_image.data();
-        let bytes = data.bytes();
-
-        let mut img_buffer = ImageBuffer::new(width, height);
-
-        for y in 0..height {
-            for x in 0..width {
-                let offset = (y as usize * bytes_per_row) + (x as usize * 4);
-                if offset + 3 < bytes.len() {
-                    let pixel = Rgba([
-                        bytes[offset + 2],
-                        bytes[offset + 1],
-                        bytes[offset],
-                        bytes[offset + 3],
-                    ]);
-                    img_buffer.put_pixel(x, y, pixel);
-                }
-            }
-        }
-
-        img_buffer
     }
 
     fn scroll_down(&self, key_type: &str) -> Result<()> {
@@ -642,7 +592,7 @@ end tell
         // Determine crop region (manual crop takes precedence)
         let crop_region: Option<(i32, i32, i32, i32)> = if let Some(crop_str) = crop {
             // Manual crop region
-            if let Some((x, y, w, h)) = Self::parse_crop_region(&crop_str) {
+            if let Some((x, y, w, h)) = presets::parse_crop_region(&crop_str) {
                 Self::log_msg(
                     &logs,
                     &format!("Manual crop: {}x{} at ({}, {})", w, h, x, y),
@@ -815,35 +765,6 @@ end tell
         );
 
         Ok(result)
-    }
-
-    fn extract_rows(img: &RgbaImage, start_y: u32, height: u32) -> RgbaImage {
-        let width = img.width();
-        let mut out: RgbaImage = ImageBuffer::new(width, height);
-        for y in 0..height {
-            for x in 0..width {
-                out.put_pixel(x, y, *img.get_pixel(x, start_y + y));
-            }
-        }
-        out
-    }
-
-    pub fn extract_fix_debug_frames(
-        img: &RgbaImage,
-        screen_height: u32,
-        overlap: u32,
-    ) -> Option<(RgbaImage, RgbaImage)> {
-        let total_h = img.height();
-        if total_h + overlap < 2 * screen_height || screen_height <= overlap {
-            return None;
-        }
-        let actual_height = screen_height - (overlap / 2);
-        let last_start = total_h - actual_height;
-        let prev_start = last_start - actual_height;
-        Some((
-            Self::extract_rows(img, prev_start, actual_height),
-            Self::extract_rows(img, last_start, actual_height),
-        ))
     }
 
     pub fn fix_stitched_overlap(
