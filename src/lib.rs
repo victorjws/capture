@@ -436,50 +436,41 @@ end tell
     fn detect_actual_overlap(img_prev: &RgbaImage, img_last: &RgbaImage, min_overlap: u32) -> u32 {
         let height = img_prev.height();
         let width = img_prev.width();
-
-        // Find the first non-uniform row in img_last to use as anchor.
-        // Blank rows (all same color) are skipped to avoid false positives in webtoons.
-        let anchor_y = (0..min_overlap)
-            .find(|&y| {
-                let first = img_last.get_pixel(0, y).0;
-                (1..width).any(|x| img_last.get_pixel(x, y).0 != first)
-            })
-            .unwrap_or(0);
-
-        // Build a fingerprint for a block of rows starting at anchor_y.
-        let block_size = 20u32.min(height.saturating_sub(anchor_y));
-        let fingerprint: Vec<Vec<_>> = (anchor_y..anchor_y + block_size)
-            .map(|y| (0..width).map(|x| *img_last.get_pixel(x, y)).collect())
-            .collect();
-
         let search_limit = height.saturating_sub(min_overlap);
 
-        for prev_y in (0..=search_limit).rev() {
-            let prev_anchor_y = prev_y + anchor_y;
-            if prev_anchor_y + block_size > height {
-                continue;
-            }
-
-            let first_row_matches = fingerprint[0]
-                .iter()
-                .enumerate()
-                .all(|(x, &pix)| *img_prev.get_pixel(x as u32, prev_anchor_y) == pix);
-
-            if first_row_matches {
-                let block_matches = (0..block_size).all(|dy| {
-                    fingerprint[dy as usize]
-                        .iter()
-                        .enumerate()
-                        .all(|(x, &pix)| *img_prev.get_pixel(x as u32, prev_anchor_y + dy) == pix)
-                });
-
-                if block_matches {
-                    return height - prev_y;
-                }
+        // Slide img_last down from fully overlapped (k=0) one row at a time.
+        // At offset k, the overlapping region is img_prev[k..] vs img_last[0..height-k-1].
+        // Return the first k where every row in that region is pixel-identical.
+        for k in 0..=search_limit {
+            if (0..height - k).all(|j| {
+                (0..width).all(|x| img_prev.get_pixel(x, k + j) == img_last.get_pixel(x, j))
+            }) {
+                return height - k;
             }
         }
 
         min_overlap
+    }
+
+    // Detects the number of duplicate rows around the wrong 50/50 seam in a stitched image.
+    // split_point is the seam position (last_start + overlap/2). Returns the smallest k≥1
+    // such that the k rows immediately before the seam equal the k rows immediately after.
+    fn detect_skip_amount(img: &RgbaImage, split_point: u32, max_k: u32) -> u32 {
+        let width = img.width();
+        let total_h = img.height();
+        for k in 1..=max_k {
+            if split_point < k || split_point + k > total_h {
+                break;
+            }
+            if (0..k).all(|j| {
+                (0..width).all(|x| {
+                    img.get_pixel(x, split_point - k + j) == img.get_pixel(x, split_point + j)
+                })
+            }) {
+                return k;
+            }
+        }
+        0
     }
 
     fn stitch_images(&self, images: Vec<RgbaImage>, overlaps: &[u32]) -> RgbaImage {
@@ -843,11 +834,11 @@ end tell
         overlap: u32,
     ) -> Option<(RgbaImage, RgbaImage)> {
         let total_h = img.height();
-        if total_h < 2 * screen_height || screen_height <= overlap {
+        if total_h + overlap < 2 * screen_height || screen_height <= overlap {
             return None;
         }
-        let actual_height = screen_height - overlap;
-        let last_start = total_h - screen_height;
+        let actual_height = screen_height - (overlap / 2);
+        let last_start = total_h - actual_height;
         let prev_start = last_start - actual_height;
         Some((
             Self::extract_rows(img, prev_start, actual_height),
@@ -855,12 +846,6 @@ end tell
         ))
     }
 
-    /// Fixes overlap artifacts in an already-stitched image caused by a short final scroll.
-    ///
-    /// Extracts the last two frame-sized slices from the image, runs `detect_actual_overlap`
-    /// (the same logic used during capture), and trims the excess rows.
-    ///
-    /// Returns `Some(fixed)` when overlap was detected and corrected, `None` otherwise.
     pub fn fix_stitched_overlap(
         img: &RgbaImage,
         screen_height: u32,
@@ -869,41 +854,35 @@ end tell
         let total_h = img.height();
         let width = img.width();
 
-        if total_h < 2 * screen_height || screen_height <= overlap {
+        if total_h + overlap < 2 * screen_height || screen_height <= overlap {
             return None;
         }
 
-        // Reconstruct the last two captured frames from their positions in the stitched image.
-        // The last transition step may be shorter than the nominal step when the final scroll
-        // was short, so compute it via modulo rather than assuming a full step.
-        let actual_height = screen_height - overlap;
-        let last_start = total_h - actual_height;
-        let prev_start = total_h - (actual_height * 2);
+        // The wrong 50/50 seam is at last_start + overlap/2 in the stitched image.
+        // detect_skip_amount finds the k≥1 where the k rows before the seam equal the k rows
+        // after the seam — those k rows are the duplicate content introduced by the wrong overlap.
+        let split_point = total_h - screen_height + overlap / 2;
+        let max_k = screen_height - overlap;
 
-        let img_prev = Self::extract_rows(img, prev_start, actual_height);
-        let img_last = Self::extract_rows(img, last_start, actual_height);
-
-        let actual_overlap = Self::detect_actual_overlap(&img_prev, &img_last, overlap);
-
-        if actual_overlap <= overlap {
+        let skip_amount = Self::detect_skip_amount(img, split_point, max_k);
+        if skip_amount == 0 {
+            println!("[fix] No overlap detected — image looks correct.");
             return None;
         }
 
-        let skip_amount = actual_overlap - overlap;
-
-        // In the correct stitch, img[n-1] would be placed at:
-        //   y_offset_correct = last_start - skip_amount
-        // The blend midpoint (where prev frame gives way to current frame) is at:
-        //   cut_row = y_offset_correct + actual_overlap / 2
-        let y_offset_correct = last_start.saturating_sub(skip_amount);
+        // Correct seam position using actual_overlap = overlap + skip_amount.
+        // y_offset_correct is where the last frame should have started.
+        let actual_overlap = overlap + skip_amount;
+        let y_offset_correct = total_h - screen_height - skip_amount;
         let cut_row = y_offset_correct + actual_overlap / 2;
+        let src_resume = cut_row + skip_amount;
 
-        if cut_row + skip_amount > total_h {
+        if src_resume > total_h {
             return None;
         }
 
         println!(
-            "Overlap detected: actual {}px vs configured {}px — removing {} rows at row {}",
+            "[fix] Overlap detected: actual {}px vs configured {}px — removing {} rows at row {}",
             actual_overlap, overlap, skip_amount, cut_row
         );
 
@@ -915,7 +894,7 @@ end tell
                 result.put_pixel(x, y, *img.get_pixel(x, y));
             }
         }
-        for y in (cut_row + skip_amount)..total_h {
+        for y in src_resume..total_h {
             let dest_y = y - skip_amount;
             for x in 0..width {
                 result.put_pixel(x, dest_y, *img.get_pixel(x, y));
