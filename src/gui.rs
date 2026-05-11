@@ -107,6 +107,7 @@ pub struct CaptureApp {
     presets: HashMap<String, String>,
     preset_names: Vec<String>,
     font_status: String,
+    log_level: log::LevelFilter,
 }
 
 impl Default for CaptureApp {
@@ -125,6 +126,7 @@ impl Default for CaptureApp {
             presets,
             preset_names,
             font_status: "Using default font".to_string(),
+            log_level: log::LevelFilter::Info,
         }
     }
 }
@@ -171,21 +173,20 @@ impl CaptureApp {
                     .push("custom_font".to_owned());
 
                 font_loaded = true;
-                println!("Loaded font from: {}", path);
+                log::info!("Loaded font from: {}", path);
                 break;
             }
         }
 
         if !font_loaded {
-            println!("No custom font found. Using default font.");
-            println!("For Unicode support (Korean, Japanese, Chinese, etc.):");
-            println!("  Place NotoSansKR-Regular.ttf in one of these locations:");
-            for path in gui_const::DEFAULT_FONT_PATHS {
-                println!("    - {}", path);
-            }
-            if let Some(config_path) = gui_const::get_config_font_path() {
-                println!("    - {}", config_path);
-            }
+            log::warn!("No custom font found. Using default font.");
+            log::warn!(
+                "For Unicode support (Korean, Japanese, Chinese, etc.), place NotoSansKR-Regular.ttf in one of: {}{}",
+                gui_const::DEFAULT_FONT_PATHS.join(", "),
+                gui_const::get_config_font_path()
+                    .map(|p| format!(", {}", p))
+                    .unwrap_or_default()
+            );
         }
 
         ctx.set_fonts(fonts);
@@ -281,25 +282,18 @@ impl CaptureApp {
         *self.should_stop.lock().unwrap() = true;
     }
 
-    fn log(logs: &Arc<Mutex<Vec<String>>>, message: String) {
-        let timestamp = chrono::Local::now().format("%H:%M:%S%.6f");
-        let log_entry = format!("[{}] {}", timestamp, message);
-        logs.lock().unwrap().push(log_entry);
-    }
-
     fn run_capture(
         config: CaptureConfig,
         status: Arc<Mutex<CaptureStatus>>,
         should_stop: Arc<Mutex<bool>>,
         logs: Arc<Mutex<Vec<String>>>,
     ) -> anyhow::Result<String> {
-        use crate::ScreenCapture;
+        let capture = crate::ScreenCapture::new_with_logs(logs);
 
-        // Countdown display
         if config.delay > 0 {
-            Self::log(
-                &logs,
-                format!("Starting capture in {} seconds...", config.delay),
+            capture.log(
+                log::Level::Info,
+                &format!("Starting capture in {} seconds...", config.delay),
             );
 
             for remaining in (1..=config.delay).rev() {
@@ -309,7 +303,6 @@ impl CaptureApp {
                     if remaining > 1 { "s" } else { "" }
                 ));
 
-                // Check if stop was requested during countdown
                 if *should_stop.lock().unwrap() {
                     return Err(anyhow::anyhow!("Capture cancelled during countdown"));
                 }
@@ -318,11 +311,7 @@ impl CaptureApp {
             }
         }
 
-        let capture = ScreenCapture::new();
-
-        // Prepare crop option
         let crop_option = if config.use_preset && !config.selected_preset.is_empty() {
-            // Use preset value directly
             use crate::presets;
             if let Ok(all_presets) = presets::get_all_presets() {
                 all_presets.get(&config.selected_preset).cloned()
@@ -338,7 +327,7 @@ impl CaptureApp {
             None
         };
 
-        Self::log(&logs, "Starting screenshot mode...".to_string());
+        capture.log(log::Level::Info, "Starting screenshot mode...");
         *status.lock().unwrap() = CaptureStatus::Running("Capturing screenshots...".to_string());
 
         let max_scrolls = if config.max_scrolls.is_empty() {
@@ -347,9 +336,9 @@ impl CaptureApp {
             config.max_scrolls.parse().ok()
         };
 
-        Self::log(
-            &logs,
-            format!(
+        capture.log(
+            log::Level::Info,
+            &format!(
                 "Max scrolls: {:?}, Scroll delay: {}ms, Overlap: {}px",
                 max_scrolls
                     .map(|n: usize| n.to_string())
@@ -362,20 +351,17 @@ impl CaptureApp {
         let result_image = capture.capture_with_scroll_with_stop(
             config.overlap,
             max_scrolls,
-            0, // Delay already handled in GUI countdown
+            0,
             config.scroll_key.as_str(),
             config.window_only,
             crop_option,
             config.scroll_delay,
             should_stop.clone(),
-            logs.clone(),
         )?;
 
-        Self::log(&logs, "Saving image...".to_string());
-
+        capture.log(log::Level::Info, "Saving image...");
         *status.lock().unwrap() = CaptureStatus::Running("Saving image...".to_string());
 
-        // Build full output path with format
         let output_path = crate::build_output_path(&config.output_filename, &config.output_format);
         result_image.save(&output_path)?;
         Ok(output_path)
@@ -770,6 +756,49 @@ impl CaptureApp {
                 }
             });
         });
+
+        ui.add_space(10.0);
+
+        // Log level settings
+        ui.group(|ui| {
+            ui.label("Log Level");
+            ui.add_space(5.0);
+
+            let levels = [
+                (log::LevelFilter::Error, "Error"),
+                (log::LevelFilter::Warn, "Warn"),
+                (log::LevelFilter::Info, "Info"),
+                (log::LevelFilter::Debug, "Debug"),
+                (log::LevelFilter::Trace, "Trace"),
+            ];
+
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                for (level, label) in &levels {
+                    if ui.radio(self.log_level == *level, *label).clicked() {
+                        self.log_level = *level;
+                        changed = true;
+                    }
+                }
+            });
+
+            if changed {
+                log::set_max_level(self.log_level);
+            }
+
+            ui.add_space(5.0);
+            ui.label(
+                egui::RichText::new(match self.log_level {
+                    log::LevelFilter::Error => "Only errors",
+                    log::LevelFilter::Warn => "Errors + warnings",
+                    log::LevelFilter::Info => "Normal operation logs (default)",
+                    log::LevelFilter::Debug => "Detailed debug output (image comparison, etc.)",
+                    log::LevelFilter::Trace => "All internal events",
+                    log::LevelFilter::Off => "",
+                })
+                .weak(),
+            );
+        });
     }
 }
 
@@ -797,20 +826,20 @@ impl CaptureApp {
 
         thread::spawn(move || {
             let result = (|| -> anyhow::Result<String> {
-                use crate::ScreenCapture;
+                let capture = crate::ScreenCapture::new_with_logs(logs.clone());
 
                 let img = image::open(&input_path)
                     .map_err(|e| anyhow::anyhow!("Failed to open image: {}", e))?
                     .to_rgba8();
 
-                Self::log(
-                    &logs,
-                    format!("Loaded: {} ({}x{})", input_path, img.width(), img.height()),
+                capture.log(
+                    log::Level::Info,
+                    &format!("Loaded: {} ({}x{})", input_path, img.width(), img.height()),
                 );
                 *status.lock().unwrap() =
                     CaptureStatus::Running("Detecting overlap...".to_string());
 
-                match ScreenCapture::fix_stitched_overlap(&img, screen_height, overlap) {
+                match capture.fix_stitched_overlap(&img, screen_height, overlap) {
                     Some(fixed) => {
                         let output_path = if fix_output.is_empty() {
                             let stem = std::path::Path::new(&input_path)
@@ -822,14 +851,16 @@ impl CaptureApp {
                             crate::build_output_path(&fix_output, &output_format)
                         };
 
-                        *status.lock().unwrap() =
-                            CaptureStatus::Running("Saving...".to_string());
+                        *status.lock().unwrap() = CaptureStatus::Running("Saving...".to_string());
                         fixed.save(&output_path)?;
-                        Self::log(&logs, format!("Saved: {}", output_path));
+                        capture.log(log::Level::Info, &format!("Saved: {}", output_path));
                         Ok(output_path)
                     }
                     None => {
-                        Self::log(&logs, "No overlap detected — image looks correct.".to_string());
+                        capture.log(
+                            log::Level::Info,
+                            "No overlap detected — image looks correct.",
+                        );
                         Err(anyhow::anyhow!("No overlap found"))
                     }
                 }
@@ -842,8 +873,9 @@ impl CaptureApp {
                         CaptureStatus::Completed(format!("Saved to: {}", path));
                 }
                 Err(e) if e.to_string() == "No overlap found" => {
-                    *status.lock().unwrap() =
-                        CaptureStatus::Completed("No overlap detected — image looks correct.".to_string());
+                    *status.lock().unwrap() = CaptureStatus::Completed(
+                        "No overlap detected — image looks correct.".to_string(),
+                    );
                 }
                 Err(e) => {
                     *status.lock().unwrap() = CaptureStatus::Error(format!("{}", e));

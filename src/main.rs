@@ -165,6 +165,7 @@ fn save_preset_from_string(preset_str: &str) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    env_logger::init();
     let args = Args::parse();
 
     // Launch GUI mode if requested
@@ -187,7 +188,8 @@ fn main() -> Result<()> {
 
         println!("Fixing: {} ({}x{})", fix_path, img.width(), img.height());
 
-        match ScreenCapture::fix_stitched_overlap(&img, screen_height, args.overlap) {
+        let capture = ScreenCapture::new();
+        match capture.fix_stitched_overlap(&img, screen_height, args.overlap) {
             Some(fixed) => {
                 let output_path = if args.output == "00" {
                     let stem = std::path::Path::new(fix_path)

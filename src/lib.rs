@@ -7,6 +7,7 @@ use constants::timing;
 use crossterm::event::{Event, KeyCode, KeyEvent, poll, read};
 use enigo::{Enigo, Key, Keyboard, Settings};
 use image::{ImageBuffer, Rgba, RgbaImage};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -42,15 +43,27 @@ pub fn build_output_path(filename: &str, format: &str) -> String {
 }
 
 pub struct ScreenCapture {
-    #[cfg(target_os = "windows")]
-    _phantom: (),
+    logs: Option<Arc<Mutex<Vec<String>>>>,
 }
 
 impl ScreenCapture {
     pub fn new() -> Self {
-        Self {
-            #[cfg(target_os = "windows")]
-            _phantom: (),
+        Self { logs: None }
+    }
+
+    pub fn new_with_logs(logs: Arc<Mutex<Vec<String>>>) -> Self {
+        Self { logs: Some(logs) }
+    }
+
+    pub fn log(&self, level: log::Level, msg: &str) {
+        if log::log_enabled!(level) {
+            if let Some(logs) = &self.logs {
+                let timestamp = chrono::Local::now().format("%H:%M:%S%.6f");
+                logs.lock()
+                    .unwrap()
+                    .push(format!("[{}] {}", timestamp, msg));
+            }
+            log::log!(level, "{}", msg);
         }
     }
 
@@ -316,7 +329,10 @@ end tell
                 }
                 return Ok(cropped);
             } else {
-                println!("Crop region out of bounds, using full screen");
+                self.log(
+                    log::Level::Warn,
+                    "Crop region out of bounds, using full screen",
+                );
             }
         }
 
@@ -341,12 +357,15 @@ end tell
     fn images_are_identical(&self, img1: &RgbaImage, img2: &RgbaImage) -> bool {
         // Check if images have the same dimensions
         if img1.width() != img2.width() || img1.height() != img2.height() {
-            println!(
-                "    [DEBUG] Size mismatch: {}x{} vs {}x{}",
-                img1.width(),
-                img1.height(),
-                img2.width(),
-                img2.height()
+            self.log(
+                log::Level::Debug,
+                &format!(
+                    "Size mismatch: {}x{} vs {}x{}",
+                    img1.width(),
+                    img1.height(),
+                    img2.width(),
+                    img2.height()
+                ),
             );
             return false;
         }
@@ -355,23 +374,24 @@ end tell
         let height = img1.height();
         let total_pixels = (width * height) as usize;
 
-        println!(
-            "    [DEBUG] Comparing entire images: {}x{} ({} pixels)",
-            width, height, total_pixels
+        self.log(
+            log::Level::Debug,
+            &format!(
+                "Comparing images: {}x{} ({} pixels)",
+                width, height, total_pixels
+            ),
         );
 
-        // Compare every pixel
         let mut diff_count = 0;
         for y in 0..height {
             for x in 0..width {
                 if img1.get_pixel(x, y) != img2.get_pixel(x, y) {
                     diff_count += 1;
-                    // Early exit if we find any difference
                     if diff_count > 0 {
-                        let diff_percentage = (diff_count as f32 / total_pixels as f32) * 100.0;
-                        println!(
-                            "    [DEBUG] Found {} different pixels ({:.6}%)",
-                            diff_count, diff_percentage
+                        let pct = (diff_count as f32 / total_pixels as f32) * 100.0;
+                        self.log(
+                            log::Level::Debug,
+                            &format!("Found {} different pixels ({:.6}%)", diff_count, pct),
                         );
                         return false;
                     }
@@ -379,7 +399,7 @@ end tell
             }
         }
 
-        println!("    [DEBUG] Images are completely identical");
+        self.log(log::Level::Debug, "Images are completely identical");
         true
     }
 
@@ -468,16 +488,6 @@ end tell
         result
     }
 
-    fn log_msg(logs: &Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>, msg: &str) {
-        if let Some(logs) = logs {
-            let timestamp = chrono::Local::now().format("%H:%M:%S%.6f");
-            logs.lock()
-                .unwrap()
-                .push(format!("[{}] {}", timestamp, msg));
-        }
-        println!("{}", msg);
-    }
-
     pub fn capture_with_scroll(
         &self,
         overlap: u32,
@@ -497,7 +507,6 @@ end tell
             crop,
             scroll_delay_ms,
             false,
-            None,
             None,
         )
     }
@@ -522,7 +531,6 @@ end tell
             scroll_delay_ms,
             true,
             None,
-            None,
         )
     }
 
@@ -535,8 +543,7 @@ end tell
         window_only: bool,
         crop: Option<String>,
         scroll_delay_ms: u64,
-        stop_flag: std::sync::Arc<std::sync::Mutex<bool>>,
-        logs: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        stop_flag: Arc<Mutex<bool>>,
     ) -> Result<RgbaImage> {
         self.capture_with_scroll_impl(
             overlap,
@@ -548,7 +555,6 @@ end tell
             scroll_delay_ms,
             true,
             Some(stop_flag),
-            Some(logs),
         )
     }
 
@@ -562,61 +568,66 @@ end tell
         crop: Option<String>,
         scroll_delay_ms: u64,
         skip_input: bool,
-        stop_flag: Option<std::sync::Arc<std::sync::Mutex<bool>>>,
-        logs: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
+        stop_flag: Option<Arc<Mutex<bool>>>,
     ) -> Result<RgbaImage> {
-        Self::log_msg(
-            &logs,
+        self.log(
+            log::Level::Info,
             &format!("Starting scroll capture in {} seconds...", delay),
         );
-        Self::log_msg(&logs, "Please focus on the window you want to capture!");
-        Self::log_msg(
-            &logs,
+        self.log(
+            log::Level::Info,
+            "Please focus on the window you want to capture!",
+        );
+        self.log(
+            log::Level::Info,
             "Make sure to grant Accessibility permission in System Settings > Privacy & Security",
         );
-        Self::log_msg(
-            &logs,
+        self.log(
+            log::Level::Info,
             &format!(
                 "The program will press {} key once per capture",
                 key_type.to_uppercase()
             ),
         );
-        Self::log_msg(&logs, &format!("Scroll delay: {}ms", scroll_delay_ms));
+        self.log(
+            log::Level::Info,
+            &format!("Scroll delay: {}ms", scroll_delay_ms),
+        );
         if let Some(max) = max_scrolls {
-            Self::log_msg(&logs, &format!("Max scrolls: {}", max));
+            self.log(log::Level::Info, &format!("Max scrolls: {}", max));
         } else {
-            Self::log_msg(&logs, "Max scrolls: unlimited (press Q to stop)");
+            self.log(log::Level::Info, "Max scrolls: unlimited (press Q to stop)");
         }
         thread::sleep(Duration::from_secs(delay));
 
-        // Determine crop region (manual crop takes precedence)
         let crop_region: Option<(i32, i32, i32, i32)> = if let Some(crop_str) = crop {
-            // Manual crop region
             if let Some((x, y, w, h)) = presets::parse_crop_region(&crop_str) {
-                Self::log_msg(
-                    &logs,
+                self.log(
+                    log::Level::Info,
                     &format!("Manual crop: {}x{} at ({}, {})", w, h, x, y),
                 );
                 Some((x, y, w, h))
             } else {
-                Self::log_msg(&logs, "Invalid crop format, capturing full screen");
-                Self::log_msg(
-                    &logs,
+                self.log(
+                    log::Level::Warn,
+                    "Invalid crop format, capturing full screen",
+                );
+                self.log(
+                    log::Level::Warn,
                     "   Use format: 'x,y,width,height' (e.g., '100,50,1920,1080')",
                 );
                 None
             }
         } else if window_only {
-            // Auto-detect focused window
             if let Some((x, y, w, h)) = self.get_focused_window_bounds()? {
-                Self::log_msg(
-                    &logs,
+                self.log(
+                    log::Level::Info,
                     &format!("Focused window: {}x{} at ({}, {})", w, h, x, y),
                 );
                 Some((x, y, w, h))
             } else {
-                Self::log_msg(
-                    &logs,
+                self.log(
+                    log::Level::Warn,
                     "Could not detect focused window, capturing full screen",
                 );
                 None
@@ -627,8 +638,8 @@ end tell
 
         let mut images = Vec::new();
         let first_capture = self.capture_screen(crop_region)?;
-        Self::log_msg(
-            &logs,
+        self.log(
+            log::Level::Info,
             &format!(
                 "Captured screen 1 ({}x{})",
                 first_capture.width(),
@@ -641,22 +652,23 @@ end tell
         let mut scroll_count = 0;
 
         loop {
-            // Check stop flag
             if let Some(ref flag) = stop_flag {
                 if *flag.lock().unwrap() {
-                    Self::log_msg(&logs, "Stopped by user");
+                    self.log(log::Level::Info, "Stopped by user");
                     break;
                 }
             }
 
-            // Check if we've reached max_scrolls limit
             if let Some(max) = max_scrolls {
                 if scroll_count >= max {
-                    Self::log_msg(&logs, &format!("Reached maximum scroll limit ({})", max));
+                    self.log(
+                        log::Level::Info,
+                        &format!("Reached maximum scroll limit ({})", max),
+                    );
                     break;
                 }
-                Self::log_msg(
-                    &logs,
+                self.log(
+                    log::Level::Info,
                     &format!(
                         "[{}/{}] Pressing {}...",
                         scroll_count + 1,
@@ -665,8 +677,8 @@ end tell
                     ),
                 );
             } else {
-                Self::log_msg(
-                    &logs,
+                self.log(
+                    log::Level::Info,
                     &format!(
                         "[{}] Pressing {}...",
                         scroll_count + 1,
@@ -676,13 +688,11 @@ end tell
             }
 
             self.scroll_down(key_type)?;
-
-            // Wait for content to settle after scrolling
             thread::sleep(Duration::from_millis(scroll_delay_ms));
 
             let current_capture = self.capture_screen(crop_region)?;
-            Self::log_msg(
-                &logs,
+            self.log(
+                log::Level::Info,
                 &format!(
                     "Captured screen {} ({}x{})",
                     scroll_count + 2,
@@ -691,12 +701,10 @@ end tell
                 ),
             );
 
-            // Check if entire images are identical (no scrolling happened)
             let is_identical = self.images_are_identical(&previous_capture, &current_capture);
-
             if is_identical {
-                Self::log_msg(
-                    &logs,
+                self.log(
+                    log::Level::Info,
                     "Reached end of scrollable content (images are completely identical)",
                 );
                 break;
@@ -706,10 +714,8 @@ end tell
             previous_capture = current_capture;
             scroll_count += 1;
 
-            // Small delay before next scroll
             thread::sleep(Duration::from_millis(timing::SMALL_DELAY_MS));
 
-            // Check for user input to stop early (only in terminal mode)
             if !skip_input {
                 if poll(Duration::from_millis(timing::KEYBOARD_POLL_MS))? {
                     match read()? {
@@ -717,27 +723,23 @@ end tell
                             code: KeyCode::Char('q') | KeyCode::Char('Q'),
                             ..
                         }) => {
-                            Self::log_msg(&logs, "Stopped by user");
+                            self.log(log::Level::Info, "Stopped by user");
                             break;
                         }
-                        _ => {} // Ignore other keys
+                        _ => {}
                     }
                 }
             } else {
-                // In GUI mode, just sleep
                 thread::sleep(Duration::from_millis(timing::KEYBOARD_POLL_MS));
             }
         }
 
-        // Clear any remaining events before finishing (only in terminal mode)
         if !skip_input {
             while poll(Duration::from_millis(0))? {
                 let _ = read();
             }
         }
 
-        // Build per-transition overlaps. The last transition is detected from pixels
-        // because the final scroll may be shorter than a full page.
         let mut overlaps = vec![overlap; images.len().saturating_sub(1)];
         if images.len() >= 2 {
             let actual_last = Self::detect_actual_overlap(
@@ -748,8 +750,8 @@ end tell
             if let Some(last) = overlaps.last_mut() {
                 *last = actual_last;
             }
-            Self::log_msg(
-                &logs,
+            self.log(
+                log::Level::Info,
                 &format!(
                     "Last frame overlap: {}px (fixed: {}px)",
                     actual_last, overlap
@@ -757,10 +759,13 @@ end tell
             );
         }
 
-        Self::log_msg(&logs, &format!("Stitching {} images...", images.len()));
+        self.log(
+            log::Level::Info,
+            &format!("Stitching {} images...", images.len()),
+        );
         let result = self.stitch_images(images, &overlaps);
-        Self::log_msg(
-            &logs,
+        self.log(
+            log::Level::Info,
             &format!("Done! Final image: {}x{}", result.width(), result.height()),
         );
 
@@ -768,6 +773,7 @@ end tell
     }
 
     pub fn fix_stitched_overlap(
+        &self,
         img: &RgbaImage,
         screen_height: u32,
         overlap: u32,
@@ -779,20 +785,18 @@ end tell
             return None;
         }
 
-        // The wrong 50/50 seam is at last_start + overlap/2 in the stitched image.
-        // detect_skip_amount finds the k≥1 where the k rows before the seam equal the k rows
-        // after the seam — those k rows are the duplicate content introduced by the wrong overlap.
         let split_point = total_h - screen_height + overlap / 2;
         let max_k = screen_height - overlap;
 
         let skip_amount = Self::detect_skip_amount(img, split_point, max_k);
         if skip_amount == 0 {
-            println!("[fix] No overlap detected — image looks correct.");
+            self.log(
+                log::Level::Info,
+                "No overlap detected — image looks correct.",
+            );
             return None;
         }
 
-        // Correct seam position using actual_overlap = overlap + skip_amount.
-        // y_offset_correct is where the last frame should have started.
         let actual_overlap = overlap + skip_amount;
         let y_offset_correct = total_h - screen_height - skip_amount;
         let cut_row = y_offset_correct + actual_overlap / 2;
@@ -802,9 +806,12 @@ end tell
             return None;
         }
 
-        println!(
-            "[fix] Overlap detected: actual {}px vs configured {}px — removing {} rows at row {}",
-            actual_overlap, overlap, skip_amount, cut_row
+        self.log(
+            log::Level::Info,
+            &format!(
+                "Overlap detected: actual {}px vs configured {}px — removing {} rows at row {}",
+                actual_overlap, overlap, skip_amount, cut_row
+            ),
         );
 
         let new_total_h = total_h - skip_amount;
