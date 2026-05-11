@@ -53,6 +53,7 @@ struct CaptureConfig {
     fix_input_path: String,
     fix_screen_height: u32,
     fix_output_filename: String,
+    fix_folder_mode: bool,
 }
 
 impl Default for CaptureConfig {
@@ -78,6 +79,7 @@ impl Default for CaptureConfig {
             fix_input_path: String::new(),
             fix_screen_height: 1007,
             fix_output_filename: String::new(),
+            fix_folder_mode: false,
         }
     }
 }
@@ -806,7 +808,7 @@ impl CaptureApp {
     fn start_fix(&mut self) {
         if self.config.fix_input_path.is_empty() {
             *self.status.lock().unwrap() =
-                CaptureStatus::Error("No input file selected.".to_string());
+                CaptureStatus::Error("No input path specified.".to_string());
             return;
         }
 
@@ -815,73 +817,177 @@ impl CaptureApp {
         let overlap = self.config.overlap;
         let output_format = self.config.output_format.clone();
         let fix_output = self.config.fix_output_filename.clone();
+        let folder_mode = self.config.fix_folder_mode;
 
         let status = Arc::clone(&self.status);
         let is_running = Arc::clone(&self.is_running);
         let logs = Arc::clone(&self.logs);
 
         *is_running.lock().unwrap() = true;
-        *status.lock().unwrap() = CaptureStatus::Running("Loading image...".to_string());
+        *status.lock().unwrap() = CaptureStatus::Running("Starting...".to_string());
         logs.lock().unwrap().clear();
 
         thread::spawn(move || {
-            let result = (|| -> anyhow::Result<String> {
-                let capture = crate::ScreenCapture::new_with_logs(logs.clone());
+            let capture = crate::ScreenCapture::new_with_logs(logs);
 
-                let img = image::open(&input_path)
-                    .map_err(|e| anyhow::anyhow!("Failed to open image: {}", e))?
-                    .to_rgba8();
-
-                capture.log(
-                    log::Level::Info,
-                    &format!("Loaded: {} ({}x{})", input_path, img.width(), img.height()),
-                );
-                *status.lock().unwrap() =
-                    CaptureStatus::Running("Detecting overlap...".to_string());
-
-                match capture.fix_stitched_overlap(&img, screen_height, overlap) {
-                    Some(fixed) => {
-                        let output_path = if fix_output.is_empty() {
-                            let stem = std::path::Path::new(&input_path)
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("fixed");
-                            crate::build_output_path(&format!("{}_fixed", stem), &output_format)
-                        } else {
-                            crate::build_output_path(&fix_output, &output_format)
-                        };
-
-                        *status.lock().unwrap() = CaptureStatus::Running("Saving...".to_string());
-                        fixed.save(&output_path)?;
-                        capture.log(log::Level::Info, &format!("Saved: {}", output_path));
-                        Ok(output_path)
-                    }
-                    None => {
-                        capture.log(
-                            log::Level::Info,
-                            "No overlap detected — image looks correct.",
-                        );
-                        Err(anyhow::anyhow!("No overlap found"))
-                    }
-                }
-            })();
+            if folder_mode {
+                Self::run_fix_folder(&capture, &input_path, &output_format, screen_height, overlap, &status);
+            } else {
+                Self::run_fix_single(&capture, &input_path, &output_format, &fix_output, screen_height, overlap, &status);
+            }
 
             *is_running.lock().unwrap() = false;
-            match result {
-                Ok(path) => {
-                    *status.lock().unwrap() =
-                        CaptureStatus::Completed(format!("Saved to: {}", path));
+        });
+    }
+
+    fn run_fix_single(
+        capture: &crate::ScreenCapture,
+        input_path: &str,
+        output_format: &str,
+        fix_output: &str,
+        screen_height: u32,
+        overlap: u32,
+        status: &Arc<Mutex<CaptureStatus>>,
+    ) {
+        let result = (|| -> anyhow::Result<String> {
+            let img = image::open(input_path)
+                .map_err(|e| anyhow::anyhow!("Failed to open image: {}", e))?
+                .to_rgba8();
+
+            capture.log(log::Level::Info, &format!("Loaded: {} ({}x{})", input_path, img.width(), img.height()));
+            *status.lock().unwrap() = CaptureStatus::Running("Detecting overlap...".to_string());
+
+            match capture.fix_stitched_overlap(&img, screen_height, overlap) {
+                Some(fixed) => {
+                    let output_path = if fix_output.is_empty() {
+                        let stem = std::path::Path::new(input_path)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("fixed");
+                        let dir = std::path::Path::new(input_path)
+                            .parent()
+                            .and_then(|p| p.to_str())
+                            .unwrap_or(".");
+                        format!("{}/{}", dir, crate::build_output_path(&format!("{}_fixed", stem), output_format))
+                    } else {
+                        crate::build_output_path(fix_output, output_format)
+                    };
+                    *status.lock().unwrap() = CaptureStatus::Running("Saving...".to_string());
+                    fixed.save(&output_path)?;
+                    capture.log(log::Level::Info, &format!("Saved: {}", output_path));
+                    Ok(output_path)
                 }
-                Err(e) if e.to_string() == "No overlap found" => {
-                    *status.lock().unwrap() = CaptureStatus::Completed(
-                        "No overlap detected — image looks correct.".to_string(),
-                    );
-                }
-                Err(e) => {
-                    *status.lock().unwrap() = CaptureStatus::Error(format!("{}", e));
+                None => {
+                    capture.log(log::Level::Info, "No overlap detected — image looks correct.");
+                    Err(anyhow::anyhow!("No overlap found"))
                 }
             }
-        });
+        })();
+
+        match result {
+            Ok(path) => {
+                *status.lock().unwrap() = CaptureStatus::Completed(format!("Saved to: {}", path));
+            }
+            Err(e) if e.to_string() == "No overlap found" => {
+                *status.lock().unwrap() =
+                    CaptureStatus::Completed("No overlap detected — image looks correct.".to_string());
+            }
+            Err(e) => {
+                *status.lock().unwrap() = CaptureStatus::Error(format!("{}", e));
+            }
+        }
+    }
+
+    fn run_fix_folder(
+        capture: &crate::ScreenCapture,
+        folder_path: &str,
+        output_format: &str,
+        screen_height: u32,
+        overlap: u32,
+        status: &Arc<Mutex<CaptureStatus>>,
+    ) {
+        const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif"];
+
+        let dir = match std::fs::read_dir(folder_path) {
+            Ok(d) => d,
+            Err(e) => {
+                *status.lock().unwrap() = CaptureStatus::Error(format!("Cannot read folder: {}", e));
+                return;
+            }
+        };
+
+        let mut files: Vec<std::path::PathBuf> = dir
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file()
+                    && p.extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| IMAGE_EXTS.contains(&e.to_lowercase().as_str()))
+                        .unwrap_or(false)
+                    && !p
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.ends_with("_fixed"))
+                        .unwrap_or(false)
+            })
+            .collect();
+
+        files.sort();
+
+        if files.is_empty() {
+            *status.lock().unwrap() = CaptureStatus::Completed("No images found in folder.".to_string());
+            return;
+        }
+
+        capture.log(log::Level::Info, &format!("Found {} image(s) to process", files.len()));
+
+        let mut fixed_count = 0;
+        let mut skipped_count = 0;
+        let total = files.len();
+
+        for (i, path) in files.iter().enumerate() {
+            let path_str = path.to_string_lossy();
+            *status.lock().unwrap() = CaptureStatus::Running(format!("[{}/{}] {}", i + 1, total, path.file_name().unwrap_or_default().to_string_lossy()));
+
+            let img = match image::open(path).map(|i| i.to_rgba8()) {
+                Ok(img) => img,
+                Err(e) => {
+                    capture.log(log::Level::Warn, &format!("Skipping {}: {}", path_str, e));
+                    skipped_count += 1;
+                    continue;
+                }
+            };
+
+            capture.log(log::Level::Info, &format!("[{}/{}] {}", i + 1, total, path_str));
+
+            match capture.fix_stitched_overlap(&img, screen_height, overlap) {
+                Some(fixed) => {
+                    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("fixed");
+                    let dir = path.parent().and_then(|p| p.to_str()).unwrap_or(".");
+                    let out = format!("{}/{}", dir, crate::build_output_path(&format!("{}_fixed", stem), output_format));
+                    match fixed.save(&out) {
+                        Ok(_) => {
+                            capture.log(log::Level::Info, &format!("  → Saved: {}", out));
+                            fixed_count += 1;
+                        }
+                        Err(e) => {
+                            capture.log(log::Level::Warn, &format!("  → Save failed: {}", e));
+                            skipped_count += 1;
+                        }
+                    }
+                }
+                None => {
+                    capture.log(log::Level::Info, "  → No overlap detected, skipped");
+                    skipped_count += 1;
+                }
+            }
+        }
+
+        *status.lock().unwrap() = CaptureStatus::Completed(format!(
+            "Done: {} fixed, {} skipped (total {})",
+            fixed_count, skipped_count, total
+        ));
     }
 
     fn render_fix_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -916,16 +1022,35 @@ impl CaptureApp {
         let is_running = *self.is_running.lock().unwrap();
 
         ui.group(|ui| {
-            // Input file
+            // Mode toggle
             ui.horizontal(|ui| {
-                ui.label("Input image:");
+                ui.label("Mode:");
+                ui.radio_value(&mut self.config.fix_folder_mode, false, "Single file");
+                ui.radio_value(&mut self.config.fix_folder_mode, true, "Folder (all images)");
+            });
+
+            ui.separator();
+
+            // Input path
+            ui.horizontal(|ui| {
+                ui.label(if self.config.fix_folder_mode { "Folder:" } else { "Input image:" });
                 ui.add(
                     egui::TextEdit::singleline(&mut self.config.fix_input_path)
-                        .hint_text("Path to stitched image")
+                        .hint_text(if self.config.fix_folder_mode {
+                            "Path to folder containing images"
+                        } else {
+                            "Path to stitched image"
+                        })
                         .desired_width(ui.available_width() - 90.0),
                 );
                 if ui.button("Browse...").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
+                    if self.config.fix_folder_mode {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            if let Some(s) = path.to_str() {
+                                self.config.fix_input_path = s.to_string();
+                            }
+                        }
+                    } else if let Some(path) = rfd::FileDialog::new()
                         .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "tiff"])
                         .pick_file()
                     {
@@ -936,15 +1061,19 @@ impl CaptureApp {
                 }
             });
 
-            // Output file (optional)
-            ui.horizontal(|ui| {
-                ui.label("Output filename:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.config.fix_output_filename)
-                        .hint_text("Leave empty to auto-generate (<name>_fixed)")
-                        .desired_width(ui.available_width()),
-                );
-            });
+            // Output filename (single file mode only)
+            if !self.config.fix_folder_mode {
+                ui.horizontal(|ui| {
+                    ui.label("Output filename:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.config.fix_output_filename)
+                            .hint_text("Leave empty to auto-generate (<name>_fixed)")
+                            .desired_width(ui.available_width()),
+                    );
+                });
+            } else {
+                ui.label(egui::RichText::new("Output: <name>_fixed.<format> saved in same folder").weak());
+            }
 
             ui.add_space(5.0);
 
@@ -961,10 +1090,8 @@ impl CaptureApp {
 
         ui.add_space(10.0);
 
-        if ui
-            .add_enabled(!is_running, egui::Button::new("🔧 Fix Image"))
-            .clicked()
-        {
+        let btn_label = if self.config.fix_folder_mode { "🔧 Fix All Images" } else { "🔧 Fix Image" };
+        if ui.add_enabled(!is_running, egui::Button::new(btn_label)).clicked() {
             self.start_fix();
         }
 
