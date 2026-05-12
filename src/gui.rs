@@ -159,7 +159,7 @@ impl CaptureApp {
             if let Ok(font_data) = std::fs::read(path) {
                 fonts.font_data.insert(
                     "custom_font".to_owned(),
-                    std::sync::Arc::new(egui::FontData::from_owned(font_data)),
+                    Arc::new(egui::FontData::from_owned(font_data)),
                 );
 
                 fonts
@@ -861,56 +861,13 @@ impl CaptureApp {
         overlap: u32,
         status: &Arc<Mutex<CaptureStatus>>,
     ) {
-        let result = (|| -> anyhow::Result<String> {
-            let img = image::open(input_path)
-                .map_err(|e| anyhow::anyhow!("Failed to open image: {}", e))?
-                .to_rgba8();
-
-            capture.log(
-                log::Level::Info,
-                &format!("Loaded: {} ({}x{})", input_path, img.width(), img.height()),
-            );
-            *status.lock().unwrap() = CaptureStatus::Running("Detecting overlap...".to_string());
-
-            match capture.fix_stitched_overlap(&img, screen_height, overlap) {
-                Some(fixed) => {
-                    let output_path = if fix_output.is_empty() {
-                        let stem = std::path::Path::new(input_path)
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("fixed");
-                        let dir = std::path::Path::new(input_path)
-                            .parent()
-                            .and_then(|p| p.to_str())
-                            .unwrap_or(".");
-                        format!(
-                            "{}/{}",
-                            dir,
-                            crate::build_output_path(&format!("{}_fixed", stem), output_format)
-                        )
-                    } else {
-                        crate::build_output_path(fix_output, output_format)
-                    };
-                    *status.lock().unwrap() = CaptureStatus::Running("Saving...".to_string());
-                    fixed.save(&output_path)?;
-                    capture.log(log::Level::Info, &format!("Saved: {}", output_path));
-                    Ok(output_path)
-                }
-                None => {
-                    capture.log(
-                        log::Level::Info,
-                        "No overlap detected — image looks correct.",
-                    );
-                    Err(anyhow::anyhow!("No overlap found"))
-                }
+        let output_override = if fix_output.is_empty() { None } else { Some(fix_output) };
+        match capture.fix_image(input_path, output_format, output_override, screen_height, overlap) {
+            Ok(Some(path)) => {
+                *status.lock().unwrap() =
+                    CaptureStatus::Completed(format!("Saved to: {}", path));
             }
-        })();
-
-        match result {
-            Ok(path) => {
-                *status.lock().unwrap() = CaptureStatus::Completed(format!("Saved to: {}", path));
-            }
-            Err(e) if e.to_string() == "No overlap found" => {
+            Ok(None) => {
                 *status.lock().unwrap() = CaptureStatus::Completed(
                     "No overlap detected — image looks correct.".to_string(),
                 );
@@ -929,105 +886,34 @@ impl CaptureApp {
         overlap: u32,
         status: &Arc<Mutex<CaptureStatus>>,
     ) {
-        const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif"];
-
-        let dir = match std::fs::read_dir(folder_path) {
-            Ok(d) => d,
-            Err(e) => {
+        let result = capture.fix_images_in_folder(
+            folder_path,
+            output_format,
+            screen_height,
+            overlap,
+            |cur, total, name| {
                 *status.lock().unwrap() =
-                    CaptureStatus::Error(format!("Cannot read folder: {}", e));
-                return;
-            }
-        };
-
-        let mut files: Vec<std::path::PathBuf> = dir
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.is_file()
-                    && p.extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| IMAGE_EXTS.contains(&e.to_lowercase().as_str()))
-                        .unwrap_or(false)
-                    && !p
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.ends_with("_fixed"))
-                        .unwrap_or(false)
-            })
-            .collect();
-
-        files.sort();
-
-        if files.is_empty() {
-            *status.lock().unwrap() =
-                CaptureStatus::Completed("No images found in folder.".to_string());
-            return;
-        }
-
-        capture.log(
-            log::Level::Info,
-            &format!("Found {} image(s) to process", files.len()),
+                    CaptureStatus::Running(format!("[{}/{}] {}", cur, total, name));
+            },
         );
 
-        let mut fixed_count = 0;
-        let mut skipped_count = 0;
-        let total = files.len();
-
-        for (i, path) in files.iter().enumerate() {
-            let path_str = path.to_string_lossy();
-            *status.lock().unwrap() = CaptureStatus::Running(format!(
-                "[{}/{}] {}",
-                i + 1,
-                total,
-                path.file_name().unwrap_or_default().to_string_lossy()
-            ));
-
-            let img = match image::open(path).map(|i| i.to_rgba8()) {
-                Ok(img) => img,
-                Err(e) => {
-                    capture.log(log::Level::Warn, &format!("Skipping {}: {}", path_str, e));
-                    skipped_count += 1;
-                    continue;
-                }
-            };
-
-            capture.log(
-                log::Level::Info,
-                &format!("[{}/{}] {}", i + 1, total, path_str),
-            );
-
-            match capture.fix_stitched_overlap(&img, screen_height, overlap) {
-                Some(fixed) => {
-                    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("fixed");
-                    let dir = path.parent().and_then(|p| p.to_str()).unwrap_or(".");
-                    let out = format!(
-                        "{}/{}",
-                        dir,
-                        crate::build_output_path(&format!("{}_fixed", stem), output_format)
-                    );
-                    match fixed.save(&out) {
-                        Ok(_) => {
-                            capture.log(log::Level::Info, &format!("  → Saved: {}", out));
-                            fixed_count += 1;
-                        }
-                        Err(e) => {
-                            capture.log(log::Level::Warn, &format!("  → Save failed: {}", e));
-                            skipped_count += 1;
-                        }
-                    }
-                }
-                None => {
-                    capture.log(log::Level::Info, "  → No overlap detected, skipped");
-                    skipped_count += 1;
-                }
+        match result {
+            Ok((fixed, skipped)) if fixed + skipped == 0 => {
+                *status.lock().unwrap() =
+                    CaptureStatus::Completed("No images found in folder.".to_string());
+            }
+            Ok((fixed, skipped)) => {
+                *status.lock().unwrap() = CaptureStatus::Completed(format!(
+                    "Done: {} fixed, {} skipped (total {})",
+                    fixed,
+                    skipped,
+                    fixed + skipped
+                ));
+            }
+            Err(e) => {
+                *status.lock().unwrap() = CaptureStatus::Error(format!("{}", e));
             }
         }
-
-        *status.lock().unwrap() = CaptureStatus::Completed(format!(
-            "Done: {} fixed, {} skipped (total {})",
-            fixed_count, skipped_count, total
-        ));
     }
 
     fn render_fix_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {

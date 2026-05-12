@@ -2,6 +2,7 @@ use anyhow::Result;
 use capture::presets;
 use capture::{ScreenCapture, build_output_path, validate_format};
 use clap::Parser;
+use log::info;
 
 #[derive(Parser, Debug)]
 #[command(name = "capture")]
@@ -72,7 +73,6 @@ struct Args {
     )]
     save_preset: Option<String>,
 
-    // Old mode options
     #[arg(
         short,
         long,
@@ -98,142 +98,103 @@ struct Args {
 }
 
 fn list_presets() -> Result<()> {
-    println!("\nAVAILABLE CROP PRESETS");
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-
     let builtin = presets::get_builtin_presets();
     let custom = presets::load_presets()?;
 
-    println!("\nBuilt-in presets:");
+    info!("\nAVAILABLE CROP PRESETS");
+    info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+    info!("\nBuilt-in presets:");
     for (name, value) in builtin.iter() {
         if !custom.contains_key(name) {
-            println!("  {} = {}", name, value);
+            info!("  {} = {}", name, value);
         }
     }
 
     if !custom.is_empty() {
-        println!("\nCustom presets:");
+        info!("\nCustom presets:");
         for (name, value) in custom.iter() {
-            println!("  {} = {}", name, value);
+            info!("  {} = {}", name, value);
         }
-
         let preset_file = presets::get_preset_file_path()?;
-        println!("\nCustom presets file: {}", preset_file.display());
+        info!("\nCustom presets file: {}", preset_file.display());
     } else {
-        println!("\nCustom presets: (none)");
+        info!("\nCustom presets: (none)");
         let preset_file = presets::get_preset_file_path()?;
-        println!("   Save presets with: --save-preset name:x,y,w,h");
-        println!("   File will be created at: {}", preset_file.display());
+        info!("   Save presets with: --save-preset name:x,y,w,h");
+        info!("   File will be created at: {}", preset_file.display());
     }
 
-    println!("\nUsage:");
-    println!("   --crop-preset <name>");
-    println!("   Example: --crop-preset 1080p");
-    println!();
+    info!("\nUsage:");
+    info!("   --crop-preset <name>");
+    info!("   Example: --crop-preset 1080p");
 
     Ok(())
 }
 
 fn save_preset_from_string(preset_str: &str) -> Result<()> {
     let parts: Vec<&str> = preset_str.splitn(2, ':').collect();
-
     if parts.len() != 2 {
         return Err(anyhow::anyhow!(
             "Invalid preset format. Use: name:x,y,width,height\nExample: --save-preset mypreset:100,50,1920,1080"
         ));
     }
-
-    let name = parts[0].trim();
-    let value = parts[1].trim();
-
-    // Validate the crop region format
-    if presets::parse_crop_region(value).is_none() {
-        return Err(anyhow::anyhow!(
-            "Invalid crop region format: {}\nUse: x,y,width,height (e.g., '100,50,1920,1080')",
-            value
-        ));
-    }
-
-    let mut preset_map = presets::load_presets()?;
-    preset_map.insert(name.to_string(), value.to_string());
-    presets::save_presets(&preset_map)?;
-
-    println!("Preset '{}' saved: {}", name, value);
-    println!("\nUse with: --crop-preset {}", name);
-
+    let (name, value) = (parts[0].trim(), parts[1].trim());
+    presets::save_preset(name, value)?;
+    info!("Preset '{}' saved: {}", name, value);
+    info!("Use with: --crop-preset {}", name);
     Ok(())
 }
 
 fn main() -> Result<()> {
-    env_logger::init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format(|buf, record| {
+            use std::io::Write;
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            writeln!(buf, "{} [{}] {}", ts, record.level(), record.args())
+        })
+        .init();
+
     let args = Args::parse();
 
-    // Launch GUI mode if requested
     if args.gui {
         capture::gui::run_gui().map_err(|e| anyhow::anyhow!("GUI error: {:?}", e))?;
         return Ok(());
     }
 
-    // Handle --fix
     if let Some(fix_path) = &args.fix {
         let screen_height = args.screen_height.ok_or_else(|| {
             anyhow::anyhow!(
                 "--screen-height is required when using --fix (e.g., --screen-height 1080)"
             )
         })?;
-
-        let img = image::open(fix_path)
-            .map_err(|e| anyhow::anyhow!("Failed to open {}: {}", fix_path, e))?
-            .to_rgba8();
-
-        println!("Fixing: {} ({}x{})", fix_path, img.width(), img.height());
-
         let capture = ScreenCapture::new();
-        match capture.fix_stitched_overlap(&img, screen_height, args.overlap) {
-            Some(fixed) => {
-                let output_path = if args.output == "00" {
-                    let stem = std::path::Path::new(fix_path)
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("fixed");
-                    build_output_path(&format!("{}_fixed", stem), &args.format)
-                } else {
-                    build_output_path(&args.output, &args.format)
-                };
-                fixed.save(&output_path)?;
-                println!("Saved to {}", output_path);
-            }
-            None => {
-                println!("No overlap detected — image looks correct.");
-            }
+        let output_override = if args.output == "00" { None } else { Some(args.output.as_str()) };
+        match capture.fix_image(fix_path, &args.format, output_override, screen_height, args.overlap)? {
+            Some(path) => info!("Saved to {}", path),
+            None => info!("No overlap detected — image looks correct."),
         }
         return Ok(());
     }
 
-    // Handle --list-presets
     if args.list_presets {
         return list_presets();
     }
 
-    // Handle --save-preset
     if let Some(preset_str) = &args.save_preset {
         return save_preset_from_string(preset_str);
     }
 
-    // Validate format before starting capture
     validate_format(&args.format)?;
 
-    // Build full output path
     let output_path = build_output_path(&args.output, &args.format);
-
     let capture = ScreenCapture::new();
 
-    // Resolve crop value (preset takes precedence if both are specified)
     let crop_value = if let Some(preset_name) = &args.crop_preset {
         let all_presets = presets::get_all_presets()?;
         match all_presets.get(preset_name) {
             Some(value) => {
-                println!("Using preset '{}': {}", preset_name, value);
+                info!("Using preset '{}': {}", preset_name, value);
                 Some(value.clone())
             }
             None => {
@@ -247,11 +208,9 @@ fn main() -> Result<()> {
         args.crop.clone()
     };
 
-    // Handle region selection mode
     if args.select_region {
         let (x, y, w, h) = ScreenCapture::select_region_interactive()?;
 
-        // Offer to run capture immediately
         use std::io::{self, Write};
         print!("Do you want to capture this region now? (y/N): ");
         io::stdout().flush()?;
@@ -260,36 +219,31 @@ fn main() -> Result<()> {
         io::stdin().read_line(&mut input)?;
 
         if input.trim().to_lowercase() == "y" {
-            println!("\n📸 Starting capture with selected region...\n");
+            info!("Starting capture with selected region...");
             let result_image = capture.capture_with_scroll(
                 args.overlap,
                 args.max_scrolls,
                 args.delay,
                 &args.key,
-                false, // Don't use window_only
+                false,
                 Some(format!("{},{},{},{}", x, y, w, h)),
                 args.scroll_delay,
             )?;
-
             result_image.save(&output_path)?;
-            println!("\n💾 Saved to {}", output_path);
+            info!("Saved to {}", output_path);
         }
 
         return Ok(());
     }
 
-    // Screenshot mode
-    println!("📸 SCREENSHOT MODE");
-    println!("Configuration:");
-    println!("  Output: {}", output_path);
-    println!("  Overlap: {} pixels", args.overlap);
-    if let Some(max) = args.max_scrolls {
-        println!("  Max scrolls: {}", max);
-    } else {
-        println!("  Max scrolls: unlimited");
+    info!("SCREENSHOT MODE");
+    info!("Output: {}", output_path);
+    info!("Overlap: {} pixels", args.overlap);
+    match args.max_scrolls {
+        Some(max) => info!("Max scrolls: {}", max),
+        None => info!("Max scrolls: unlimited"),
     }
-    println!("  Scroll key: {}", args.key);
-    println!();
+    info!("Scroll key: {}", args.key);
 
     let result_image = capture.capture_with_scroll(
         args.overlap,
@@ -297,12 +251,12 @@ fn main() -> Result<()> {
         args.delay,
         &args.key,
         args.window_only,
-        crop_value.clone(),
+        crop_value,
         args.scroll_delay,
     )?;
 
     result_image.save(&output_path)?;
-    println!("Saved to {}", output_path);
+    info!("Saved to {}", output_path);
 
     Ok(())
 }

@@ -67,6 +67,132 @@ impl ScreenCapture {
         }
     }
 
+    pub fn fix_image(
+        &self,
+        input_path: &str,
+        output_format: &str,
+        output_path_override: Option<&str>,
+        screen_height: u32,
+        overlap: u32,
+    ) -> Result<Option<String>> {
+        let img = image::open(input_path)
+            .map_err(|e| anyhow::anyhow!("Failed to open image: {}", e))?
+            .to_rgba8();
+
+        self.log(
+            log::Level::Info,
+            &format!("Loaded: {} ({}x{})", input_path, img.width(), img.height()),
+        );
+
+        match self.fix_stitched_overlap(&img, screen_height, overlap) {
+            Some(fixed) => {
+                let output_path = match output_path_override {
+                    Some(p) if !p.is_empty() => build_output_path(p, output_format),
+                    _ => {
+                        let stem = std::path::Path::new(input_path)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("fixed");
+                        let dir = std::path::Path::new(input_path)
+                            .parent()
+                            .and_then(|p| p.to_str())
+                            .unwrap_or(".");
+                        format!(
+                            "{}/{}",
+                            dir,
+                            build_output_path(&format!("{}_fixed", stem), output_format)
+                        )
+                    }
+                };
+                fixed
+                    .save(&output_path)
+                    .map_err(|e| anyhow::anyhow!("Failed to save: {}", e))?;
+                self.log(log::Level::Info, &format!("Saved: {}", output_path));
+                Ok(Some(output_path))
+            }
+            None => {
+                self.log(log::Level::Info, "No overlap detected — image looks correct.");
+                Ok(None)
+            }
+        }
+    }
+
+    pub fn fix_images_in_folder(
+        &self,
+        folder_path: &str,
+        output_format: &str,
+        screen_height: u32,
+        overlap: u32,
+        on_progress: impl Fn(usize, usize, &str),
+    ) -> Result<(usize, usize)> {
+        const IMAGE_EXTENSIONS: &[&str] =
+            &["png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif"];
+
+        let dir = std::fs::read_dir(folder_path)
+            .map_err(|e| anyhow::anyhow!("Cannot read folder: {}", e))?;
+
+        let mut files: Vec<std::path::PathBuf> = dir
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file()
+                    && p.extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| IMAGE_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+                        .unwrap_or(false)
+                    && !p
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.ends_with("_fixed"))
+                        .unwrap_or(false)
+            })
+            .collect();
+
+        files.sort();
+
+        if files.is_empty() {
+            return Ok((0, 0));
+        }
+
+        self.log(
+            log::Level::Info,
+            &format!("Found {} image(s) to process", files.len()),
+        );
+
+        let mut fixed_count = 0;
+        let mut skipped_count = 0;
+        let total = files.len();
+
+        for (i, path) in files.iter().enumerate() {
+            let file_name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            on_progress(i + 1, total, &file_name);
+
+            let path_str = path.to_string_lossy().into_owned();
+            self.log(
+                log::Level::Info,
+                &format!("[{}/{}] {}", i + 1, total, path_str),
+            );
+
+            match self.fix_image(&path_str, output_format, None, screen_height, overlap) {
+                Ok(Some(_)) => fixed_count += 1,
+                Ok(None) => {
+                    self.log(log::Level::Info, "  → No overlap detected, skipped");
+                    skipped_count += 1;
+                }
+                Err(e) => {
+                    self.log(log::Level::Warn, &format!("  → Error: {}", e));
+                    skipped_count += 1;
+                }
+            }
+        }
+
+        Ok((fixed_count, skipped_count))
+    }
+
     #[cfg(target_os = "macos")]
     fn get_mouse_position() -> Result<(i32, i32)> {
         let script = r#"

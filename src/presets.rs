@@ -56,6 +56,18 @@ pub fn get_all_presets() -> Result<HashMap<String, String>> {
     Ok(all_presets)
 }
 
+pub fn save_preset(name: &str, value: &str) -> Result<()> {
+    if parse_crop_region(value).is_none() {
+        return Err(anyhow::anyhow!(
+            "Invalid crop region format: {}\nUse: x,y,width,height (e.g., '100,50,1920,1080')",
+            value
+        ));
+    }
+    let mut preset_map = load_presets()?;
+    preset_map.insert(name.to_string(), value.to_string());
+    save_presets(&preset_map)
+}
+
 pub fn parse_crop_region(crop_str: &str) -> Option<(i32, i32, i32, i32)> {
     let parts: Vec<i32> = crop_str
         .split(|c| c == ',' || c == ':' || c == ' ')
