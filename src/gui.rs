@@ -371,24 +371,21 @@ impl CaptureApp {
 }
 
 impl eframe::App for CaptureApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // Tab buttons at the top
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.current_tab, Tab::Capture, "📷 Capture");
-                ui.selectable_value(&mut self.current_tab, Tab::Fix, "🔧 Fix");
-                ui.selectable_value(&mut self.current_tab, Tab::Settings, "⚙ Settings");
-            });
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.current_tab, Tab::Capture, "📷 Capture");
+            ui.selectable_value(&mut self.current_tab, Tab::Fix, "🔧 Fix");
+            ui.selectable_value(&mut self.current_tab, Tab::Settings, "⚙ Settings");
+        });
 
-            ui.separator();
-            ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(10.0);
 
-            // Tab content
-            egui::ScrollArea::vertical().show(ui, |ui| match self.current_tab {
-                Tab::Capture => self.render_capture_tab(ui, ctx),
-                Tab::Fix => self.render_fix_tab(ui, ctx),
-                Tab::Settings => self.render_settings_tab(ui, ctx),
-            });
+        egui::ScrollArea::vertical().show(ui, |ui| match self.current_tab {
+            Tab::Capture => self.render_capture_tab(ui, &ctx),
+            Tab::Fix => self.render_fix_tab(ui, &ctx),
+            Tab::Settings => self.render_settings_tab(ui, &ctx),
         });
     }
 }
@@ -831,9 +828,24 @@ impl CaptureApp {
             let capture = crate::ScreenCapture::new_with_logs(logs);
 
             if folder_mode {
-                Self::run_fix_folder(&capture, &input_path, &output_format, screen_height, overlap, &status);
+                Self::run_fix_folder(
+                    &capture,
+                    &input_path,
+                    &output_format,
+                    screen_height,
+                    overlap,
+                    &status,
+                );
             } else {
-                Self::run_fix_single(&capture, &input_path, &output_format, &fix_output, screen_height, overlap, &status);
+                Self::run_fix_single(
+                    &capture,
+                    &input_path,
+                    &output_format,
+                    &fix_output,
+                    screen_height,
+                    overlap,
+                    &status,
+                );
             }
 
             *is_running.lock().unwrap() = false;
@@ -854,7 +866,10 @@ impl CaptureApp {
                 .map_err(|e| anyhow::anyhow!("Failed to open image: {}", e))?
                 .to_rgba8();
 
-            capture.log(log::Level::Info, &format!("Loaded: {} ({}x{})", input_path, img.width(), img.height()));
+            capture.log(
+                log::Level::Info,
+                &format!("Loaded: {} ({}x{})", input_path, img.width(), img.height()),
+            );
             *status.lock().unwrap() = CaptureStatus::Running("Detecting overlap...".to_string());
 
             match capture.fix_stitched_overlap(&img, screen_height, overlap) {
@@ -868,7 +883,11 @@ impl CaptureApp {
                             .parent()
                             .and_then(|p| p.to_str())
                             .unwrap_or(".");
-                        format!("{}/{}", dir, crate::build_output_path(&format!("{}_fixed", stem), output_format))
+                        format!(
+                            "{}/{}",
+                            dir,
+                            crate::build_output_path(&format!("{}_fixed", stem), output_format)
+                        )
                     } else {
                         crate::build_output_path(fix_output, output_format)
                     };
@@ -878,7 +897,10 @@ impl CaptureApp {
                     Ok(output_path)
                 }
                 None => {
-                    capture.log(log::Level::Info, "No overlap detected — image looks correct.");
+                    capture.log(
+                        log::Level::Info,
+                        "No overlap detected — image looks correct.",
+                    );
                     Err(anyhow::anyhow!("No overlap found"))
                 }
             }
@@ -889,8 +911,9 @@ impl CaptureApp {
                 *status.lock().unwrap() = CaptureStatus::Completed(format!("Saved to: {}", path));
             }
             Err(e) if e.to_string() == "No overlap found" => {
-                *status.lock().unwrap() =
-                    CaptureStatus::Completed("No overlap detected — image looks correct.".to_string());
+                *status.lock().unwrap() = CaptureStatus::Completed(
+                    "No overlap detected — image looks correct.".to_string(),
+                );
             }
             Err(e) => {
                 *status.lock().unwrap() = CaptureStatus::Error(format!("{}", e));
@@ -911,7 +934,8 @@ impl CaptureApp {
         let dir = match std::fs::read_dir(folder_path) {
             Ok(d) => d,
             Err(e) => {
-                *status.lock().unwrap() = CaptureStatus::Error(format!("Cannot read folder: {}", e));
+                *status.lock().unwrap() =
+                    CaptureStatus::Error(format!("Cannot read folder: {}", e));
                 return;
             }
         };
@@ -936,11 +960,15 @@ impl CaptureApp {
         files.sort();
 
         if files.is_empty() {
-            *status.lock().unwrap() = CaptureStatus::Completed("No images found in folder.".to_string());
+            *status.lock().unwrap() =
+                CaptureStatus::Completed("No images found in folder.".to_string());
             return;
         }
 
-        capture.log(log::Level::Info, &format!("Found {} image(s) to process", files.len()));
+        capture.log(
+            log::Level::Info,
+            &format!("Found {} image(s) to process", files.len()),
+        );
 
         let mut fixed_count = 0;
         let mut skipped_count = 0;
@@ -948,7 +976,12 @@ impl CaptureApp {
 
         for (i, path) in files.iter().enumerate() {
             let path_str = path.to_string_lossy();
-            *status.lock().unwrap() = CaptureStatus::Running(format!("[{}/{}] {}", i + 1, total, path.file_name().unwrap_or_default().to_string_lossy()));
+            *status.lock().unwrap() = CaptureStatus::Running(format!(
+                "[{}/{}] {}",
+                i + 1,
+                total,
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ));
 
             let img = match image::open(path).map(|i| i.to_rgba8()) {
                 Ok(img) => img,
@@ -959,13 +992,20 @@ impl CaptureApp {
                 }
             };
 
-            capture.log(log::Level::Info, &format!("[{}/{}] {}", i + 1, total, path_str));
+            capture.log(
+                log::Level::Info,
+                &format!("[{}/{}] {}", i + 1, total, path_str),
+            );
 
             match capture.fix_stitched_overlap(&img, screen_height, overlap) {
                 Some(fixed) => {
                     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("fixed");
                     let dir = path.parent().and_then(|p| p.to_str()).unwrap_or(".");
-                    let out = format!("{}/{}", dir, crate::build_output_path(&format!("{}_fixed", stem), output_format));
+                    let out = format!(
+                        "{}/{}",
+                        dir,
+                        crate::build_output_path(&format!("{}_fixed", stem), output_format)
+                    );
                     match fixed.save(&out) {
                         Ok(_) => {
                             capture.log(log::Level::Info, &format!("  → Saved: {}", out));
@@ -1026,14 +1066,22 @@ impl CaptureApp {
             ui.horizontal(|ui| {
                 ui.label("Mode:");
                 ui.radio_value(&mut self.config.fix_folder_mode, false, "Single file");
-                ui.radio_value(&mut self.config.fix_folder_mode, true, "Folder (all images)");
+                ui.radio_value(
+                    &mut self.config.fix_folder_mode,
+                    true,
+                    "Folder (all images)",
+                );
             });
 
             ui.separator();
 
             // Input path
             ui.horizontal(|ui| {
-                ui.label(if self.config.fix_folder_mode { "Folder:" } else { "Input image:" });
+                ui.label(if self.config.fix_folder_mode {
+                    "Folder:"
+                } else {
+                    "Input image:"
+                });
                 ui.add(
                     egui::TextEdit::singleline(&mut self.config.fix_input_path)
                         .hint_text(if self.config.fix_folder_mode {
@@ -1072,7 +1120,10 @@ impl CaptureApp {
                     );
                 });
             } else {
-                ui.label(egui::RichText::new("Output: <name>_fixed.<format> saved in same folder").weak());
+                ui.label(
+                    egui::RichText::new("Output: <name>_fixed.<format> saved in same folder")
+                        .weak(),
+                );
             }
 
             ui.add_space(5.0);
@@ -1090,8 +1141,15 @@ impl CaptureApp {
 
         ui.add_space(10.0);
 
-        let btn_label = if self.config.fix_folder_mode { "🔧 Fix All Images" } else { "🔧 Fix Image" };
-        if ui.add_enabled(!is_running, egui::Button::new(btn_label)).clicked() {
+        let btn_label = if self.config.fix_folder_mode {
+            "🔧 Fix All Images"
+        } else {
+            "🔧 Fix Image"
+        };
+        if ui
+            .add_enabled(!is_running, egui::Button::new(btn_label))
+            .clicked()
+        {
             self.start_fix();
         }
 
