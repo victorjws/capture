@@ -576,6 +576,7 @@ end tell
 
         let width = images[0].width();
         let single_height = images[0].height();
+        let stride = (width * 4) as usize;
         let step_sum: u32 = overlaps.iter().map(|&o| single_height - o).sum();
         let total_height = single_height + step_sum;
 
@@ -584,26 +585,14 @@ end tell
         let mut y_offset = 0u32;
         for (i, img) in images.iter().enumerate() {
             let overlap = if i > 0 { overlaps[i - 1] } else { 0 };
+            // Top half of overlap stays from the previous frame; start writing from the midpoint
+            let skip_rows = if i > 0 { overlap / 2 } else { 0 };
 
-            for y in 0..single_height {
-                for x in 0..width {
-                    let target_y = y_offset + y;
-                    if target_y < total_height {
-                        if i > 0 && y < overlap {
-                            // Use middle of overlap as boundary
-                            if y >= overlap / 2 {
-                                // Bottom half of overlap: use current image
-                                let pixel = img.get_pixel(x, y);
-                                result.put_pixel(x, target_y, *pixel);
-                            }
-                            // Top half: skip (previous image already there)
-                        } else {
-                            // Copy pixel normally (outside overlap region)
-                            let pixel = img.get_pixel(x, y);
-                            result.put_pixel(x, target_y, *pixel);
-                        }
-                    }
-                }
+            for y in skip_rows..single_height {
+                let target_y = (y_offset + y) as usize;
+                let src = &img.as_raw()[(y as usize * stride)..(y as usize + 1) * stride];
+                let dst = &mut result.as_mut()[target_y * stride..(target_y + 1) * stride];
+                dst.copy_from_slice(src);
             }
 
             if i < overlaps.len() {
@@ -890,15 +879,17 @@ end tell
             &format!("Stitching {} images...", images.len()),
         );
         let screen_height = images.first().map(|img| img.height()).unwrap_or(0);
+        let image_count = images.len();
         let mut result = self.stitch_images(images, &overlaps);
         self.log(
             log::Level::Info,
             &format!("Done! Final image: {}x{}", result.width(), result.height()),
         );
 
-        if let Some(fixed) = self.fix_stitched_overlap(&result, screen_height, overlap) {
-            self.log(log::Level::Info, "Auto-fix applied to last frame seam.");
-            result = fixed;
+        if image_count >= 2 {
+            if let Some(fixed) = self.fix_stitched_overlap(&result, screen_height, overlap) {
+                result = fixed;
+            }
         }
 
         Ok(result)
@@ -948,18 +939,16 @@ end tell
 
         let new_total_h = total_h - skip_amount;
         let mut result: RgbaImage = ImageBuffer::new(width, new_total_h);
+        let stride = (width * 4) as usize;
 
-        for y in 0..cut_row {
-            for x in 0..width {
-                result.put_pixel(x, y, *img.get_pixel(x, y));
-            }
-        }
-        for y in src_resume..total_h {
-            let dest_y = y - skip_amount;
-            for x in 0..width {
-                result.put_pixel(x, dest_y, *img.get_pixel(x, y));
-            }
-        }
+        let head = cut_row as usize * stride;
+        result.as_mut()[..head].copy_from_slice(&img.as_raw()[..head]);
+
+        let src_start = src_resume as usize * stride;
+        let dst_start = (src_resume - skip_amount) as usize * stride;
+        let tail = (total_h - src_resume) as usize * stride;
+        result.as_mut()[dst_start..dst_start + tail]
+            .copy_from_slice(&img.as_raw()[src_start..src_start + tail]);
 
         Some(result)
     }
