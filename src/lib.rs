@@ -889,11 +889,17 @@ end tell
             log::Level::Info,
             &format!("Stitching {} images...", images.len()),
         );
-        let result = self.stitch_images(images, &overlaps);
+        let screen_height = images.first().map(|img| img.height()).unwrap_or(0);
+        let mut result = self.stitch_images(images, &overlaps);
         self.log(
             log::Level::Info,
             &format!("Done! Final image: {}x{}", result.width(), result.height()),
         );
+
+        if let Some(fixed) = self.fix_stitched_overlap(&result, screen_height, overlap) {
+            self.log(log::Level::Info, "Auto-fix applied to last frame seam.");
+            result = fixed;
+        }
 
         Ok(result)
     }
