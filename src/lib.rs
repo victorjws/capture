@@ -481,8 +481,7 @@ end tell
     }
 
     fn images_are_identical(&self, img1: &RgbaImage, img2: &RgbaImage) -> bool {
-        // Check if images have the same dimensions
-        if img1.width() != img2.width() || img1.height() != img2.height() {
+        if img1.dimensions() != img2.dimensions() {
             self.log(
                 log::Level::Debug,
                 &format!(
@@ -495,43 +494,13 @@ end tell
             );
             return false;
         }
-
-        let width = img1.width();
-        let height = img1.height();
-        let total_pixels = (width * height) as usize;
-
-        self.log(
-            log::Level::Debug,
-            &format!(
-                "Comparing images: {}x{} ({} pixels)",
-                width, height, total_pixels
-            ),
-        );
-
-        let mut diff_count = 0;
-        for y in 0..height {
-            for x in 0..width {
-                if img1.get_pixel(x, y) != img2.get_pixel(x, y) {
-                    diff_count += 1;
-                    if diff_count > 0 {
-                        let pct = (diff_count as f32 / total_pixels as f32) * 100.0;
-                        self.log(
-                            log::Level::Debug,
-                            &format!("Found {} different pixels ({:.6}%)", diff_count, pct),
-                        );
-                        return false;
-                    }
-                }
-            }
-        }
-
-        self.log(log::Level::Debug, "Images are completely identical");
-        true
+        img1.as_raw() == img2.as_raw()
     }
 
     fn detect_actual_overlap(img_prev: &RgbaImage, img_last: &RgbaImage, min_overlap: u32) -> u32 {
         let height = img_prev.height();
         let width = img_prev.width();
+        let stride = (width * 4) as usize;
         let search_limit = height.saturating_sub(min_overlap);
 
         // Slide img_last down from fully overlapped (k=0) one row at a time.
@@ -539,7 +508,9 @@ end tell
         // Return the first k where every row in that region is pixel-identical.
         for k in 0..=search_limit {
             if (0..height - k).all(|j| {
-                (0..width).all(|x| img_prev.get_pixel(x, k + j) == img_last.get_pixel(x, j))
+                let a = &img_prev.as_raw()[(k + j) as usize * stride..(k + j + 1) as usize * stride];
+                let b = &img_last.as_raw()[j as usize * stride..(j + 1) as usize * stride];
+                a == b
             }) {
                 return height - k;
             }
@@ -553,15 +524,16 @@ end tell
     // such that the k rows immediately before the seam equal the k rows immediately after.
     fn detect_skip_amount(img: &RgbaImage, split_point: u32, max_k: u32) -> u32 {
         let width = img.width();
+        let stride = (width * 4) as usize;
         let total_h = img.height();
         for k in 1..=max_k {
             if split_point < k || split_point + k > total_h {
                 break;
             }
             if (0..k).all(|j| {
-                (0..width).all(|x| {
-                    img.get_pixel(x, split_point - k + j) == img.get_pixel(x, split_point + j)
-                })
+                let a = &img.as_raw()[(split_point - k + j) as usize * stride..(split_point - k + j + 1) as usize * stride];
+                let b = &img.as_raw()[(split_point + j) as usize * stride..(split_point + j + 1) as usize * stride];
+                a == b
             }) {
                 return k;
             }
@@ -761,9 +733,8 @@ end tell
                 first_capture.height()
             ),
         );
-        images.push(first_capture.clone());
+        images.push(first_capture);
 
-        let mut previous_capture = first_capture;
         let mut scroll_count = 0;
 
         loop {
