@@ -736,6 +736,7 @@ end tell
         images.push(first_capture);
 
         let mut scroll_count = 0;
+        let mut previous_capture = images[0].clone();
 
         loop {
             if let Some(ref flag) = stop_flag {
