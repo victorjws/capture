@@ -97,11 +97,14 @@ impl ScreenCapture {
                             .parent()
                             .and_then(|p| p.to_str())
                             .unwrap_or(".");
-                        format!(
+                        let orig_backup = format!(
                             "{}/{}",
                             dir,
-                            build_output_path(&format!("{}_fixed", stem), output_format)
-                        )
+                            build_output_path(&format!("{}_orig", stem), output_format)
+                        );
+                        std::fs::rename(input_path, &orig_backup)
+                            .map_err(|e| anyhow::anyhow!("Failed to rename original: {}", e))?;
+                        input_path.to_string()
                     }
                 };
                 fixed
@@ -143,7 +146,7 @@ impl ScreenCapture {
                     && !p
                         .file_stem()
                         .and_then(|s| s.to_str())
-                        .map(|s| s.ends_with("_fixed"))
+                        .map(|s| s.ends_with("_orig"))
                         .unwrap_or(false)
             })
             .collect();

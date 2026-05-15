@@ -1001,13 +1001,13 @@ impl CaptureApp {
                     ui.label("Output filename:");
                     ui.add(
                         egui::TextEdit::singleline(&mut self.config.fix_output_filename)
-                            .hint_text("Leave empty to auto-generate (<name>_fixed)")
+                            .hint_text("Leave empty to overwrite original (backup saved as <name>_orig)")
                             .desired_width(ui.available_width()),
                     );
                 });
             } else {
                 ui.label(
-                    egui::RichText::new("Output: <name>_fixed.<format> saved in same folder")
+                    egui::RichText::new("Output: original overwritten, backup saved as <name>_orig.<format>")
                         .weak(),
                 );
             }
