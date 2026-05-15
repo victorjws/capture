@@ -32,6 +32,7 @@ struct CaptureConfig {
     // Screenshot mode settings
     max_scrolls: String, // Empty string means unlimited
     scroll_delay: u64,
+    duplicate_threshold: usize,
 
     // Crop settings
     window_only: bool,
@@ -66,6 +67,7 @@ impl Default for CaptureConfig {
             scroll_key: ScrollKey::Space,
             max_scrolls: defaults::MAX_SCROLLS_DEFAULT.to_string(),
             scroll_delay: defaults::SCROLL_DELAY,
+            duplicate_threshold: defaults::DUPLICATE_THRESHOLD,
             window_only: false,
             crop_enabled: false,
             use_preset: false,
@@ -359,6 +361,7 @@ impl CaptureApp {
             crop_option,
             config.scroll_delay,
             should_stop.clone(),
+            config.duplicate_threshold,
         )?;
 
         capture.log(log::Level::Info, "Saving image...");
@@ -518,6 +521,14 @@ impl CaptureApp {
                     &mut self.config.scroll_delay,
                     gui_const::SCROLL_DELAY_MIN..=gui_const::SCROLL_DELAY_MAX,
                 ));
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Duplicate threshold:");
+                ui.add(
+                    egui::DragValue::new(&mut self.config.duplicate_threshold)
+                        .range(gui_const::DUPLICATE_THRESHOLD_MIN..=gui_const::DUPLICATE_THRESHOLD_MAX),
+                );
             });
         });
 
@@ -1077,6 +1088,7 @@ impl CaptureApp {
             cmd.push(format!("--max-scrolls {}", self.config.max_scrolls));
         }
         cmd.push(format!("--scroll-delay {}", self.config.scroll_delay));
+        cmd.push(format!("--duplicate-threshold {}", self.config.duplicate_threshold));
 
         if self.config.window_only {
             cmd.push("--window-only".to_string());

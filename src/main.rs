@@ -87,6 +87,13 @@ struct Args {
     )]
     scroll_delay: u64,
 
+    #[arg(
+        long,
+        default_value_t = 2,
+        help = "Number of consecutive identical frames required to stop capture (default: 2)"
+    )]
+    duplicate_threshold: usize,
+
     #[arg(long, help = "Fix overlap artifacts in an existing stitched image")]
     fix: Option<String>,
 
@@ -228,6 +235,7 @@ fn main() -> Result<()> {
                 false,
                 Some(format!("{},{},{},{}", x, y, w, h)),
                 args.scroll_delay,
+                args.duplicate_threshold,
             )?;
             result_image.save(&output_path)?;
             info!("Saved to {}", output_path);
@@ -253,6 +261,7 @@ fn main() -> Result<()> {
         args.window_only,
         crop_value,
         args.scroll_delay,
+        args.duplicate_threshold,
     )?;
 
     result_image.save(&output_path)?;

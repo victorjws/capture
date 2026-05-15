@@ -17,6 +17,8 @@ pub mod gui {
     pub const DELAY_MAX: u64 = 10;
     pub const SCROLL_DELAY_MIN: u64 = 100;
     pub const SCROLL_DELAY_MAX: u64 = 1000;
+    pub const DUPLICATE_THRESHOLD_MIN: usize = 1;
+    pub const DUPLICATE_THRESHOLD_MAX: usize = 10;
 
     // Default font paths
     pub const DEFAULT_FONT_PATHS: &[&str] =
@@ -38,6 +40,7 @@ pub mod defaults {
     pub const DELAY: u64 = 3;
     pub const SCROLL_DELAY: u64 = 200;
     pub const MAX_SCROLLS_DEFAULT: &str = "";
+    pub const DUPLICATE_THRESHOLD: usize = 2;
 
     pub const CROP_X: i32 = 0;
     pub const CROP_Y: i32 = 0;

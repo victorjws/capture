@@ -587,6 +587,7 @@ end tell
         window_only: bool,
         crop: Option<String>,
         scroll_delay_ms: u64,
+        duplicate_threshold: usize,
     ) -> Result<RgbaImage> {
         self.capture_with_scroll_impl(
             overlap,
@@ -598,6 +599,7 @@ end tell
             scroll_delay_ms,
             false,
             None,
+            duplicate_threshold,
         )
     }
 
@@ -610,6 +612,7 @@ end tell
         window_only: bool,
         crop: Option<String>,
         scroll_delay_ms: u64,
+        duplicate_threshold: usize,
     ) -> Result<RgbaImage> {
         self.capture_with_scroll_impl(
             overlap,
@@ -621,6 +624,7 @@ end tell
             scroll_delay_ms,
             true,
             None,
+            duplicate_threshold,
         )
     }
 
@@ -634,6 +638,7 @@ end tell
         crop: Option<String>,
         scroll_delay_ms: u64,
         stop_flag: Arc<Mutex<bool>>,
+        duplicate_threshold: usize,
     ) -> Result<RgbaImage> {
         self.capture_with_scroll_impl(
             overlap,
@@ -645,6 +650,7 @@ end tell
             scroll_delay_ms,
             true,
             Some(stop_flag),
+            duplicate_threshold,
         )
     }
 
@@ -659,6 +665,7 @@ end tell
         scroll_delay_ms: u64,
         skip_input: bool,
         stop_flag: Option<Arc<Mutex<bool>>>,
+        duplicate_threshold: usize,
     ) -> Result<RgbaImage> {
         self.log(
             log::Level::Info,
@@ -740,6 +747,7 @@ end tell
 
         let mut scroll_count = 0;
         let mut previous_capture = images[0].clone();
+        let mut consecutive_identical: usize = 0;
 
         loop {
             if let Some(ref flag) = stop_flag {
@@ -793,15 +801,23 @@ end tell
 
             let is_identical = self.images_are_identical(&previous_capture, &current_capture);
             if is_identical {
-                self.log(
-                    log::Level::Info,
-                    "Reached end of scrollable content (images are completely identical)",
-                );
-                break;
+                consecutive_identical += 1;
+                if consecutive_identical >= duplicate_threshold {
+                    self.log(
+                        log::Level::Info,
+                        &format!(
+                            "Reached end of scrollable content ({} consecutive identical frames)",
+                            consecutive_identical
+                        ),
+                    );
+                    break;
+                }
+                previous_capture = current_capture;
+            } else {
+                consecutive_identical = 0;
+                images.push(current_capture.clone());
+                previous_capture = current_capture;
             }
-
-            images.push(current_capture.clone());
-            previous_capture = current_capture;
             scroll_count += 1;
 
             thread::sleep(Duration::from_millis(timing::SMALL_DELAY_MS));
