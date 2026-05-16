@@ -1,6 +1,6 @@
 use anyhow::Result;
 use capture::presets;
-use capture::{ScreenCapture, build_output_path, validate_format};
+use capture::{ScreenCapture, build_output_path, validate_format, validate_output_path};
 use clap::Parser;
 use log::info;
 
@@ -102,6 +102,13 @@ struct Args {
         help = "Height of each captured frame in pixels, required when using --fix"
     )]
     screen_height: Option<u32>,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Pixels to trim from the bottom of the final image (e.g., remove webtoon footer UI)"
+    )]
+    trim_bottom: u32,
 }
 
 fn list_presets() -> Result<()> {
@@ -175,9 +182,23 @@ fn main() -> Result<()> {
                 "--screen-height is required when using --fix (e.g., --screen-height 1080)"
             )
         })?;
+        let output_override = if args.output == "00" {
+            None
+        } else {
+            Some(args.output.as_str())
+        };
+        if let Some(out) = output_override {
+            validate_output_path(&build_output_path(out, &args.format))?;
+        }
         let capture = ScreenCapture::new();
-        let output_override = if args.output == "00" { None } else { Some(args.output.as_str()) };
-        match capture.fix_image(fix_path, &args.format, output_override, screen_height, args.overlap)? {
+        match capture.fix_image(
+            fix_path,
+            &args.format,
+            output_override,
+            screen_height,
+            args.overlap,
+            args.trim_bottom,
+        )? {
             Some(path) => info!("Saved to {}", path),
             None => info!("No overlap detected — image looks correct."),
         }
@@ -195,6 +216,7 @@ fn main() -> Result<()> {
     validate_format(&args.format)?;
 
     let output_path = build_output_path(&args.output, &args.format);
+    validate_output_path(&output_path)?;
     let capture = ScreenCapture::new();
 
     let crop_value = if let Some(preset_name) = &args.crop_preset {
@@ -236,6 +258,7 @@ fn main() -> Result<()> {
                 Some(format!("{},{},{},{}", x, y, w, h)),
                 args.scroll_delay,
                 args.duplicate_threshold,
+                args.trim_bottom,
             )?;
             result_image.save(&output_path)?;
             info!("Saved to {}", output_path);
@@ -262,6 +285,7 @@ fn main() -> Result<()> {
         crop_value,
         args.scroll_delay,
         args.duplicate_threshold,
+        args.trim_bottom,
     )?;
 
     result_image.save(&output_path)?;

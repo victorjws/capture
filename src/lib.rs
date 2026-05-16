@@ -42,6 +42,28 @@ pub fn build_output_path(filename: &str, format: &str) -> String {
     format!("{}.{}", filename, format_clean)
 }
 
+/// Validates that the output path is usable before capture starts
+pub fn validate_output_path(output_path: &str) -> Result<()> {
+    let path = std::path::Path::new(output_path);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    if stem.is_empty() {
+        return Err(anyhow::anyhow!("Output filename cannot be empty"));
+    }
+    let parent = path.parent().unwrap_or(std::path::Path::new("."));
+    let parent = if parent == std::path::Path::new("") {
+        std::path::Path::new(".")
+    } else {
+        parent
+    };
+    if !parent.exists() || !parent.is_dir() {
+        return Err(anyhow::anyhow!(
+            "Output directory does not exist: {}",
+            parent.display()
+        ));
+    }
+    Ok(())
+}
+
 pub struct ScreenCapture {
     logs: Option<Arc<Mutex<Vec<String>>>>,
 }
@@ -74,6 +96,7 @@ impl ScreenCapture {
         output_path_override: Option<&str>,
         screen_height: u32,
         overlap: u32,
+        trim_bottom: u32,
     ) -> Result<Option<String>> {
         let img = image::open(input_path)
             .map_err(|e| anyhow::anyhow!("Failed to open image: {}", e))?
@@ -84,40 +107,56 @@ impl ScreenCapture {
             &format!("Loaded: {} ({}x{})", input_path, img.width(), img.height()),
         );
 
-        match self.fix_stitched_overlap(&img, screen_height, overlap) {
-            Some(fixed) => {
-                let output_path = match output_path_override {
-                    Some(p) if !p.is_empty() => build_output_path(p, output_format),
-                    _ => {
-                        let stem = std::path::Path::new(input_path)
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("fixed");
-                        let dir = std::path::Path::new(input_path)
-                            .parent()
-                            .and_then(|p| p.to_str())
-                            .unwrap_or(".");
-                        let orig_backup = format!(
-                            "{}/{}",
-                            dir,
-                            build_output_path(&format!("{}_orig", stem), output_format)
-                        );
-                        std::fs::rename(input_path, &orig_backup)
-                            .map_err(|e| anyhow::anyhow!("Failed to rename original: {}", e))?;
-                        input_path.to_string()
-                    }
-                };
-                fixed
-                    .save(&output_path)
-                    .map_err(|e| anyhow::anyhow!("Failed to save: {}", e))?;
-                self.log(log::Level::Info, &format!("Saved: {}", output_path));
-                Ok(Some(output_path))
-            }
-            None => {
-                self.log(log::Level::Info, "No overlap detected — image looks correct.");
-                Ok(None)
-            }
+        let fixed_opt = self.fix_stitched_overlap(&img, screen_height, overlap);
+
+        let needs_save = fixed_opt.is_some() || trim_bottom > 0;
+        if !needs_save {
+            self.log(
+                log::Level::Info,
+                "No overlap detected — image looks correct.",
+            );
+            return Ok(None);
         }
+
+        let mut result = fixed_opt.unwrap_or(img);
+        if trim_bottom > 0 && result.height() > trim_bottom {
+            let h = result.height() - trim_bottom;
+            result = image::imageops::crop_imm(&result, 0, 0, result.width(), h).to_image();
+            self.log(
+                log::Level::Info,
+                &format!(
+                    "Trimmed {} pixels from bottom → new height: {}px",
+                    trim_bottom, h
+                ),
+            );
+        }
+
+        let output_path = match output_path_override {
+            Some(p) if !p.is_empty() => build_output_path(p, output_format),
+            _ => {
+                let stem = std::path::Path::new(input_path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("fixed");
+                let dir = std::path::Path::new(input_path)
+                    .parent()
+                    .and_then(|p| p.to_str())
+                    .unwrap_or(".");
+                let orig_backup = format!(
+                    "{}/{}",
+                    dir,
+                    build_output_path(&format!("{}_orig", stem), output_format)
+                );
+                std::fs::rename(input_path, &orig_backup)
+                    .map_err(|e| anyhow::anyhow!("Failed to rename original: {}", e))?;
+                input_path.to_string()
+            }
+        };
+        result
+            .save(&output_path)
+            .map_err(|e| anyhow::anyhow!("Failed to save: {}", e))?;
+        self.log(log::Level::Info, &format!("Saved: {}", output_path));
+        Ok(Some(output_path))
     }
 
     pub fn fix_images_in_folder(
@@ -126,10 +165,10 @@ impl ScreenCapture {
         output_format: &str,
         screen_height: u32,
         overlap: u32,
+        trim_bottom: u32,
         on_progress: impl Fn(usize, usize, &str),
     ) -> Result<(usize, usize)> {
-        const IMAGE_EXTENSIONS: &[&str] =
-            &["png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif"];
+        const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif"];
 
         let dir = std::fs::read_dir(folder_path)
             .map_err(|e| anyhow::anyhow!("Cannot read folder: {}", e))?;
@@ -180,7 +219,14 @@ impl ScreenCapture {
                 &format!("[{}/{}] {}", i + 1, total, path_str),
             );
 
-            match self.fix_image(&path_str, output_format, None, screen_height, overlap) {
+            match self.fix_image(
+                &path_str,
+                output_format,
+                None,
+                screen_height,
+                overlap,
+                trim_bottom,
+            ) {
                 Ok(Some(_)) => fixed_count += 1,
                 Ok(None) => {
                     self.log(log::Level::Info, "  → No overlap detected, skipped");
@@ -194,6 +240,102 @@ impl ScreenCapture {
         }
 
         Ok((fixed_count, skipped_count))
+    }
+
+    pub fn pad_numeric_filenames(
+        &self,
+        folder_path: &str,
+        on_progress: impl Fn(usize, usize, &str),
+    ) -> Result<usize> {
+        const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif"];
+
+        let dir = std::fs::read_dir(folder_path)
+            .map_err(|e| anyhow::anyhow!("Cannot read folder: {}", e))?;
+
+        let mut files: Vec<std::path::PathBuf> = dir
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file()
+                    && p.extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| IMAGE_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+                        .unwrap_or(false)
+                    && p.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.chars().all(|c| c.is_ascii_digit()))
+                        .unwrap_or(false)
+            })
+            .collect();
+
+        if files.is_empty() {
+            self.log(log::Level::Info, "No numeric-named image files found.");
+            return Ok(0);
+        }
+
+        let max_value: u64 = files
+            .iter()
+            .filter_map(|p| {
+                p.file_stem()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.parse::<u64>().ok())
+            })
+            .max()
+            .unwrap_or(0);
+
+        let max_digits = max_value.to_string().len();
+        if max_digits < 2 {
+            self.log(
+                log::Level::Info,
+                "All filenames already have 1 digit — nothing to pad.",
+            );
+            return Ok(0);
+        }
+
+        files.sort();
+        let total = files.len();
+        let mut renamed_count = 0;
+
+        for (i, path) in files.iter().enumerate() {
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let ext = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            on_progress(i + 1, total, &format!("{}.{}", stem, ext));
+
+            if stem.len() < max_digits {
+                let new_stem = format!("{:0>width$}", stem, width = max_digits);
+                let new_name = format!("{}.{}", new_stem, ext);
+                let new_path = path.with_file_name(&new_name);
+                self.log(
+                    log::Level::Info,
+                    &format!("[{}/{}] {} → {}", i + 1, total, stem, new_stem),
+                );
+                std::fs::rename(path, &new_path)
+                    .map_err(|e| anyhow::anyhow!("Failed to rename {}: {}", stem, e))?;
+                renamed_count += 1;
+            } else {
+                self.log(
+                    log::Level::Info,
+                    &format!(
+                        "[{}/{}] {} (already {} digits, skip)",
+                        i + 1,
+                        total,
+                        stem,
+                        max_digits
+                    ),
+                );
+            }
+        }
+
+        Ok(renamed_count)
     }
 
     #[cfg(target_os = "macos")]
@@ -511,7 +653,8 @@ end tell
         // Return the first k where every row in that region is pixel-identical.
         for k in 0..=search_limit {
             if (0..height - k).all(|j| {
-                let a = &img_prev.as_raw()[(k + j) as usize * stride..(k + j + 1) as usize * stride];
+                let a =
+                    &img_prev.as_raw()[(k + j) as usize * stride..(k + j + 1) as usize * stride];
                 let b = &img_last.as_raw()[j as usize * stride..(j + 1) as usize * stride];
                 a == b
             }) {
@@ -534,8 +677,10 @@ end tell
                 break;
             }
             if (0..k).all(|j| {
-                let a = &img.as_raw()[(split_point - k + j) as usize * stride..(split_point - k + j + 1) as usize * stride];
-                let b = &img.as_raw()[(split_point + j) as usize * stride..(split_point + j + 1) as usize * stride];
+                let a = &img.as_raw()[(split_point - k + j) as usize * stride
+                    ..(split_point - k + j + 1) as usize * stride];
+                let b = &img.as_raw()
+                    [(split_point + j) as usize * stride..(split_point + j + 1) as usize * stride];
                 a == b
             }) {
                 return k;
@@ -588,6 +733,7 @@ end tell
         crop: Option<String>,
         scroll_delay_ms: u64,
         duplicate_threshold: usize,
+        trim_bottom: u32,
     ) -> Result<RgbaImage> {
         self.capture_with_scroll_impl(
             overlap,
@@ -600,6 +746,7 @@ end tell
             false,
             None,
             duplicate_threshold,
+            trim_bottom,
         )
     }
 
@@ -613,6 +760,7 @@ end tell
         crop: Option<String>,
         scroll_delay_ms: u64,
         duplicate_threshold: usize,
+        trim_bottom: u32,
     ) -> Result<RgbaImage> {
         self.capture_with_scroll_impl(
             overlap,
@@ -625,6 +773,7 @@ end tell
             true,
             None,
             duplicate_threshold,
+            trim_bottom,
         )
     }
 
@@ -639,6 +788,7 @@ end tell
         scroll_delay_ms: u64,
         stop_flag: Arc<Mutex<bool>>,
         duplicate_threshold: usize,
+        trim_bottom: u32,
     ) -> Result<RgbaImage> {
         self.capture_with_scroll_impl(
             overlap,
@@ -651,6 +801,7 @@ end tell
             true,
             Some(stop_flag),
             duplicate_threshold,
+            trim_bottom,
         )
     }
 
@@ -666,6 +817,7 @@ end tell
         skip_input: bool,
         stop_flag: Option<Arc<Mutex<bool>>>,
         duplicate_threshold: usize,
+        trim_bottom: u32,
     ) -> Result<RgbaImage> {
         self.log(
             log::Level::Info,
@@ -881,6 +1033,18 @@ end tell
             if let Some(fixed) = self.fix_stitched_overlap(&result, screen_height, overlap) {
                 result = fixed;
             }
+        }
+
+        if trim_bottom > 0 && result.height() > trim_bottom {
+            let h = result.height() - trim_bottom;
+            result = image::imageops::crop_imm(&result, 0, 0, result.width(), h).to_image();
+            self.log(
+                log::Level::Info,
+                &format!(
+                    "Trimmed {} pixels from bottom → new height: {}px",
+                    trim_bottom, h
+                ),
+            );
         }
 
         Ok(result)

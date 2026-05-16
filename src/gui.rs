@@ -55,6 +55,12 @@ struct CaptureConfig {
     fix_screen_height: u32,
     fix_output_filename: String,
     fix_folder_mode: bool,
+
+    // Trim bottom settings (shared across capture and fix)
+    trim_bottom: u32,
+
+    // Rename tab settings
+    rename_folder_path: String,
 }
 
 impl Default for CaptureConfig {
@@ -82,6 +88,8 @@ impl Default for CaptureConfig {
             fix_screen_height: 1007,
             fix_output_filename: String::new(),
             fix_folder_mode: false,
+            trim_bottom: 0,
+            rename_folder_path: String::new(),
         }
     }
 }
@@ -98,6 +106,7 @@ enum CaptureStatus {
 enum Tab {
     Capture,
     Fix,
+    Rename,
     Settings,
 }
 
@@ -242,8 +251,13 @@ impl CaptureApp {
     }
 
     fn start_capture(&mut self) {
-        // Validate output format before starting
         if let Err(e) = crate::validate_format(&self.config.output_format) {
+            *self.status.lock().unwrap() = CaptureStatus::Error(format!("{}", e));
+            return;
+        }
+        let output_path =
+            crate::build_output_path(&self.config.output_filename, &self.config.output_format);
+        if let Err(e) = crate::validate_output_path(&output_path) {
             *self.status.lock().unwrap() = CaptureStatus::Error(format!("{}", e));
             return;
         }
@@ -362,6 +376,7 @@ impl CaptureApp {
             config.scroll_delay,
             should_stop.clone(),
             config.duplicate_threshold,
+            config.trim_bottom,
         )?;
 
         capture.log(log::Level::Info, "Saving image...");
@@ -379,6 +394,7 @@ impl eframe::App for CaptureApp {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.current_tab, Tab::Capture, "📷 Capture");
             ui.selectable_value(&mut self.current_tab, Tab::Fix, "🔧 Fix");
+            ui.selectable_value(&mut self.current_tab, Tab::Rename, "🔢 Rename");
             ui.selectable_value(&mut self.current_tab, Tab::Settings, "⚙ Settings");
         });
 
@@ -388,6 +404,7 @@ impl eframe::App for CaptureApp {
         egui::ScrollArea::vertical().show(ui, |ui| match self.current_tab {
             Tab::Capture => self.render_capture_tab(ui, &ctx),
             Tab::Fix => self.render_fix_tab(ui, &ctx),
+            Tab::Rename => self.render_rename_tab(ui, &ctx),
             Tab::Settings => self.render_settings_tab(ui, &ctx),
         });
     }
@@ -482,6 +499,12 @@ impl CaptureApp {
             });
 
             ui.horizontal(|ui| {
+                ui.label("Trim bottom (px):");
+                ui.add(egui::DragValue::new(&mut self.config.trim_bottom).speed(1.0));
+                ui.label(egui::RichText::new("마지막 장 하단 잘라내기").weak());
+            });
+
+            ui.horizontal(|ui| {
                 ui.label("Delay before start (seconds):");
                 ui.add(egui::Slider::new(
                     &mut self.config.delay,
@@ -526,8 +549,9 @@ impl CaptureApp {
             ui.horizontal(|ui| {
                 ui.label("Duplicate threshold:");
                 ui.add(
-                    egui::DragValue::new(&mut self.config.duplicate_threshold)
-                        .range(gui_const::DUPLICATE_THRESHOLD_MIN..=gui_const::DUPLICATE_THRESHOLD_MAX),
+                    egui::DragValue::new(&mut self.config.duplicate_threshold).range(
+                        gui_const::DUPLICATE_THRESHOLD_MIN..=gui_const::DUPLICATE_THRESHOLD_MAX,
+                    ),
                 );
             });
         });
@@ -823,6 +847,7 @@ impl CaptureApp {
         let input_path = self.config.fix_input_path.clone();
         let screen_height = self.config.fix_screen_height;
         let overlap = self.config.overlap;
+        let trim_bottom = self.config.trim_bottom;
         let output_format = self.config.output_format.clone();
         let fix_output = self.config.fix_output_filename.clone();
         let folder_mode = self.config.fix_folder_mode;
@@ -845,6 +870,7 @@ impl CaptureApp {
                     &output_format,
                     screen_height,
                     overlap,
+                    trim_bottom,
                     &status,
                 );
             } else {
@@ -855,6 +881,7 @@ impl CaptureApp {
                     &fix_output,
                     screen_height,
                     overlap,
+                    trim_bottom,
                     &status,
                 );
             }
@@ -870,13 +897,24 @@ impl CaptureApp {
         fix_output: &str,
         screen_height: u32,
         overlap: u32,
+        trim_bottom: u32,
         status: &Arc<Mutex<CaptureStatus>>,
     ) {
-        let output_override = if fix_output.is_empty() { None } else { Some(fix_output) };
-        match capture.fix_image(input_path, output_format, output_override, screen_height, overlap) {
+        let output_override = if fix_output.is_empty() {
+            None
+        } else {
+            Some(fix_output)
+        };
+        match capture.fix_image(
+            input_path,
+            output_format,
+            output_override,
+            screen_height,
+            overlap,
+            trim_bottom,
+        ) {
             Ok(Some(path)) => {
-                *status.lock().unwrap() =
-                    CaptureStatus::Completed(format!("Saved to: {}", path));
+                *status.lock().unwrap() = CaptureStatus::Completed(format!("Saved to: {}", path));
             }
             Ok(None) => {
                 *status.lock().unwrap() = CaptureStatus::Completed(
@@ -895,6 +933,7 @@ impl CaptureApp {
         output_format: &str,
         screen_height: u32,
         overlap: u32,
+        trim_bottom: u32,
         status: &Arc<Mutex<CaptureStatus>>,
     ) {
         let result = capture.fix_images_in_folder(
@@ -902,6 +941,7 @@ impl CaptureApp {
             output_format,
             screen_height,
             overlap,
+            trim_bottom,
             |cur, total, name| {
                 *status.lock().unwrap() =
                     CaptureStatus::Running(format!("[{}/{}] {}", cur, total, name));
@@ -1012,14 +1052,18 @@ impl CaptureApp {
                     ui.label("Output filename:");
                     ui.add(
                         egui::TextEdit::singleline(&mut self.config.fix_output_filename)
-                            .hint_text("Leave empty to overwrite original (backup saved as <name>_orig)")
+                            .hint_text(
+                                "Leave empty to overwrite original (backup saved as <name>_orig)",
+                            )
                             .desired_width(ui.available_width()),
                     );
                 });
             } else {
                 ui.label(
-                    egui::RichText::new("Output: original overwritten, backup saved as <name>_orig.<format>")
-                        .weak(),
+                    egui::RichText::new(
+                        "Output: original overwritten, backup saved as <name>_orig.<format>",
+                    )
+                    .weak(),
                 );
             }
 
@@ -1033,6 +1077,12 @@ impl CaptureApp {
                 ui.add_space(20.0);
                 ui.label("Overlap (px):");
                 ui.add(egui::DragValue::new(&mut self.config.overlap).speed(1.0));
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Trim bottom (px):");
+                ui.add(egui::DragValue::new(&mut self.config.trim_bottom).speed(1.0));
+                ui.label(egui::RichText::new("마지막 장 하단 잘라내기").weak());
             });
         });
 
@@ -1072,6 +1122,127 @@ impl CaptureApp {
                 });
         });
     }
+
+    fn render_rename_tab(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+        ui.heading("Rename: Pad Filenames");
+        ui.add_space(10.0);
+
+        ui.label("숫자 파일명의 최대 자리수에 맞춰 앞에 0을 붙여 자리수를 통일합니다.");
+        ui.label(
+            egui::RichText::new("예: 1.png → 001.png, 12.png → 012.png (최대가 3자리인 경우)")
+                .weak(),
+        );
+        ui.add_space(10.0);
+
+        // Status display
+        let current_status = self.status.lock().unwrap().clone();
+        match &current_status {
+            CaptureStatus::Idle => {}
+            CaptureStatus::Running(msg) => {
+                let color = egui::Color32::from_rgb(
+                    self.config.status_color[0],
+                    self.config.status_color[1],
+                    self.config.status_color[2],
+                );
+                ui.colored_label(color, format!("⏳ {}", msg));
+            }
+            CaptureStatus::Completed(msg) => {
+                ui.colored_label(egui::Color32::GREEN, format!("✓ {}", msg));
+            }
+            CaptureStatus::Error(msg) => {
+                ui.colored_label(egui::Color32::RED, format!("✗ {}", msg));
+            }
+        }
+
+        ui.add_space(10.0);
+
+        let is_running = *self.is_running.lock().unwrap();
+
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label("Folder:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.config.rename_folder_path)
+                        .hint_text("이미지 파일이 있는 폴더 경로")
+                        .desired_width(ui.available_width() - 90.0),
+                );
+                if ui.button("Browse...").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        if let Some(s) = path.to_str() {
+                            self.config.rename_folder_path = s.to_string();
+                        }
+                    }
+                }
+            });
+        });
+
+        ui.add_space(10.0);
+
+        if ui
+            .add_enabled(!is_running, egui::Button::new("🔢 Pad Filenames"))
+            .clicked()
+        {
+            self.start_pad_filenames();
+        }
+
+        ui.add_space(20.0);
+
+        ui.group(|ui| {
+            ui.label("Log");
+            ui.add_space(5.0);
+            let logs = self.logs.lock().unwrap();
+            egui::ScrollArea::vertical()
+                .max_height(200.0)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    if logs.is_empty() {
+                        ui.label("No logs yet...");
+                    } else {
+                        for log in logs.iter() {
+                            ui.label(egui::RichText::new(log).font(egui::FontId::monospace(12.0)));
+                        }
+                    }
+                });
+        });
+    }
+
+    fn start_pad_filenames(&mut self) {
+        let folder_path = self.config.rename_folder_path.clone();
+        if folder_path.is_empty() {
+            *self.status.lock().unwrap() = CaptureStatus::Error("폴더를 선택해주세요.".to_string());
+            return;
+        }
+
+        let status = Arc::clone(&self.status);
+        let is_running = Arc::clone(&self.is_running);
+        let logs = Arc::clone(&self.logs);
+
+        *is_running.lock().unwrap() = true;
+        *status.lock().unwrap() = CaptureStatus::Running("Processing...".to_string());
+        logs.lock().unwrap().clear();
+
+        thread::spawn(move || {
+            let capture = crate::ScreenCapture::new_with_logs(logs);
+            match capture.pad_numeric_filenames(&folder_path, |cur, total, name| {
+                *status.lock().unwrap() =
+                    CaptureStatus::Running(format!("[{}/{}] {}", cur, total, name));
+            }) {
+                Ok(0) => {
+                    *status.lock().unwrap() =
+                        CaptureStatus::Completed("패딩할 파일이 없습니다.".to_string());
+                }
+                Ok(n) => {
+                    *status.lock().unwrap() =
+                        CaptureStatus::Completed(format!("완료: {}개 파일 이름 변경", n));
+                }
+                Err(e) => {
+                    *status.lock().unwrap() = CaptureStatus::Error(format!("{}", e));
+                }
+            }
+            *is_running.lock().unwrap() = false;
+        });
+    }
 }
 
 impl CaptureApp {
@@ -1088,7 +1259,10 @@ impl CaptureApp {
             cmd.push(format!("--max-scrolls {}", self.config.max_scrolls));
         }
         cmd.push(format!("--scroll-delay {}", self.config.scroll_delay));
-        cmd.push(format!("--duplicate-threshold {}", self.config.duplicate_threshold));
+        cmd.push(format!(
+            "--duplicate-threshold {}",
+            self.config.duplicate_threshold
+        ));
 
         if self.config.window_only {
             cmd.push("--window-only".to_string());
