@@ -107,7 +107,7 @@ impl ScreenCapture {
             &format!("Loaded: {} ({}x{})", input_path, img.width(), img.height()),
         );
 
-        let fixed_opt = self.fix_stitched_overlap(&img, screen_height, overlap);
+        let fixed_opt = self.fix_stitched_overlap(&img, screen_height, overlap, trim_bottom);
 
         let needs_save = fixed_opt.is_some() || trim_bottom > 0;
         if !needs_save {
@@ -642,27 +642,52 @@ end tell
         img1.as_raw() == img2.as_raw()
     }
 
-    fn detect_actual_overlap(img_prev: &RgbaImage, img_last: &RgbaImage, min_overlap: u32) -> u32 {
+    fn detect_actual_overlap(
+        img_prev: &RgbaImage,
+        img_last: &RgbaImage,
+        min_overlap: u32,
+        trim_bottom: u32,
+    ) -> u32 {
+        const MIN_MATCH_RATIO: f64 = 0.9;
+
         let height = img_prev.height();
         let width = img_prev.width();
         let stride = (width * 4) as usize;
-        let search_limit = height.saturating_sub(min_overlap);
+        // Chrome rows at the bottom are identical across all frames — exclude them.
+        let effective_height = height.saturating_sub(trim_bottom);
+        let search_limit = effective_height.saturating_sub(min_overlap);
 
-        // Slide img_last down from fully overlapped (k=0) one row at a time.
-        // At offset k, the overlapping region is img_prev[k..] vs img_last[0..height-k-1].
-        // Return the first k where every row in that region is pixel-identical.
+        let mut best_ratio = -1.0_f64;
+        let mut best_k = search_limit;
+
         for k in 0..=search_limit {
-            if (0..height - k).all(|j| {
-                let a =
-                    &img_prev.as_raw()[(k + j) as usize * stride..(k + j + 1) as usize * stride];
-                let b = &img_last.as_raw()[j as usize * stride..(j + 1) as usize * stride];
-                a == b
-            }) {
-                return height - k;
+            let region_height = effective_height - k;
+            let matching = (0..region_height)
+                .filter(|&j| {
+                    let a = &img_prev.as_raw()
+                        [(k + j) as usize * stride..(k + j + 1) as usize * stride];
+                    let b = &img_last.as_raw()[j as usize * stride..(j + 1) as usize * stride];
+                    a == b
+                })
+                .count();
+
+            let ratio = matching as f64 / region_height as f64;
+
+            if ratio == 1.0 {
+                return effective_height - k;
+            }
+
+            if ratio > best_ratio {
+                best_ratio = ratio;
+                best_k = k;
             }
         }
 
-        min_overlap
+        if best_ratio >= MIN_MATCH_RATIO {
+            effective_height - best_k
+        } else {
+            min_overlap
+        }
     }
 
     // Detects the number of duplicate rows around the wrong 50/50 seam in a stitched image.
@@ -1004,6 +1029,7 @@ end tell
                 &images[images.len() - 2],
                 &images[images.len() - 1],
                 overlap,
+                trim_bottom,
             );
             if let Some(last) = overlaps.last_mut() {
                 *last = actual_last;
@@ -1030,7 +1056,9 @@ end tell
         );
 
         if image_count >= 2 {
-            if let Some(fixed) = self.fix_stitched_overlap(&result, screen_height, overlap) {
+            if let Some(fixed) =
+                self.fix_stitched_overlap(&result, screen_height, overlap, trim_bottom)
+            {
                 result = fixed;
             }
         }
@@ -1055,16 +1083,18 @@ end tell
         img: &RgbaImage,
         screen_height: u32,
         overlap: u32,
+        trim_bottom: u32,
     ) -> Option<RgbaImage> {
         let total_h = img.height();
         let width = img.width();
+        let effective_screen_height = screen_height.saturating_sub(trim_bottom);
 
-        if total_h + overlap < 2 * screen_height || screen_height <= overlap {
+        if total_h + overlap < 2 * effective_screen_height || effective_screen_height <= overlap {
             return None;
         }
 
-        let split_point = total_h - screen_height + overlap / 2;
-        let max_k = screen_height - overlap;
+        let split_point = total_h - effective_screen_height + overlap / 2;
+        let max_k = effective_screen_height - overlap;
 
         let skip_amount = Self::detect_skip_amount(img, split_point, max_k);
         if skip_amount == 0 {

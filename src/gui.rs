@@ -88,7 +88,7 @@ impl Default for CaptureConfig {
             fix_screen_height: 1007,
             fix_output_filename: String::new(),
             fix_folder_mode: false,
-            trim_bottom: 0,
+            trim_bottom: 448,
             rename_folder_path: String::new(),
         }
     }

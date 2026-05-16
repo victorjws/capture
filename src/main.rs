@@ -105,7 +105,7 @@ struct Args {
 
     #[arg(
         long,
-        default_value_t = 0,
+        default_value_t = 448,
         help = "Pixels to trim from the bottom of the final image (e.g., remove webtoon footer UI)"
     )]
     trim_bottom: u32,
