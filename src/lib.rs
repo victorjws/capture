@@ -649,6 +649,9 @@ end tell
         trim_bottom: u32,
     ) -> u32 {
         const MIN_MATCH_RATIO: f64 = 0.9;
+        // A row counts as matching if this fraction of its pixels are identical.
+        // Allows scrollbar or minor dynamic content to differ without breaking detection.
+        const MIN_PIXEL_MATCH_RATIO: f64 = 0.98;
 
         let height = img_prev.height();
         let width = img_prev.width();
@@ -667,7 +670,15 @@ end tell
                     let a = &img_prev.as_raw()
                         [(k + j) as usize * stride..(k + j + 1) as usize * stride];
                     let b = &img_last.as_raw()[j as usize * stride..(j + 1) as usize * stride];
-                    a == b
+                    if a == b {
+                        return true;
+                    }
+                    let matching_pixels = a
+                        .chunks_exact(4)
+                        .zip(b.chunks_exact(4))
+                        .filter(|(pa, pb)| pa == pb)
+                        .count();
+                    matching_pixels as f64 / width as f64 >= MIN_PIXEL_MATCH_RATIO
                 })
                 .count();
 
