@@ -1229,7 +1229,8 @@ impl CaptureApp {
     fn start_pad_filenames(&mut self) {
         let folder_path = self.config.rename_folder_path.clone();
         if folder_path.is_empty() {
-            *self.status.lock().unwrap() = CaptureStatus::Error("Please select a folder.".to_string());
+            *self.status.lock().unwrap() =
+                CaptureStatus::Error("Please select a folder.".to_string());
             return;
         }
 
