@@ -349,6 +349,10 @@ impl CaptureApp {
 
         capture.log(log::Level::Info, "Starting screenshot mode...");
         *status.lock().unwrap() = CaptureStatus::Running("Capturing screenshots...".to_string());
+        let status_for_phase = Arc::clone(&status);
+        let on_phase = move |msg: &str| {
+            *status_for_phase.lock().unwrap() = CaptureStatus::Running(msg.to_string());
+        };
 
         let max_scrolls = if config.max_scrolls.is_empty() {
             None
@@ -379,6 +383,7 @@ impl CaptureApp {
             should_stop.clone(),
             config.duplicate_threshold,
             config.trim_bottom,
+            on_phase,
         )?;
 
         capture.log(log::Level::Info, "Saving image...");
@@ -503,7 +508,7 @@ impl CaptureApp {
             ui.horizontal(|ui| {
                 ui.label("Trim bottom (px):");
                 ui.add(egui::DragValue::new(&mut self.config.trim_bottom).speed(1.0));
-                ui.label(egui::RichText::new("마지막 장 하단 잘라내기").weak());
+                ui.label(egui::RichText::new("trim bottom of last frame").weak());
             });
 
             ui.horizontal(|ui| {
@@ -1091,12 +1096,12 @@ impl CaptureApp {
             ui.horizontal(|ui| {
                 ui.label("Trim bottom (px):");
                 ui.add(egui::DragValue::new(&mut self.config.trim_bottom).speed(1.0));
-                ui.label(egui::RichText::new("마지막 장 하단 잘라내기").weak());
+                ui.label(egui::RichText::new("trim bottom of last frame").weak());
             });
 
             ui.horizontal(|ui| {
                 ui.checkbox(&mut self.config.half_seam, "Legacy seam (overlap/2)");
-                ui.label(egui::RichText::new("구버전 캡쳐 파일 수정 시 체크").weak());
+                ui.label(egui::RichText::new("for old-version captures").weak());
             });
         });
 
@@ -1141,9 +1146,9 @@ impl CaptureApp {
         ui.heading("Rename: Pad Filenames");
         ui.add_space(10.0);
 
-        ui.label("숫자 파일명의 최대 자리수에 맞춰 앞에 0을 붙여 자리수를 통일합니다.");
+        ui.label("Pads numeric filenames with leading zeros to match the maximum digit count.");
         ui.label(
-            egui::RichText::new("예: 1.png → 001.png, 12.png → 012.png (최대가 3자리인 경우)")
+            egui::RichText::new("e.g. 1.png → 001.png, 12.png → 012.png (when max is 3 digits)")
                 .weak(),
         );
         ui.add_space(10.0);
@@ -1177,7 +1182,7 @@ impl CaptureApp {
                 ui.label("Folder:");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.config.rename_folder_path)
-                        .hint_text("이미지 파일이 있는 폴더 경로")
+                        .hint_text("Folder path containing image files")
                         .desired_width(ui.available_width() - 90.0),
                 );
                 if ui.button("Browse...").clicked() {
@@ -1224,7 +1229,7 @@ impl CaptureApp {
     fn start_pad_filenames(&mut self) {
         let folder_path = self.config.rename_folder_path.clone();
         if folder_path.is_empty() {
-            *self.status.lock().unwrap() = CaptureStatus::Error("폴더를 선택해주세요.".to_string());
+            *self.status.lock().unwrap() = CaptureStatus::Error("Please select a folder.".to_string());
             return;
         }
 
@@ -1244,11 +1249,11 @@ impl CaptureApp {
             }) {
                 Ok(0) => {
                     *status.lock().unwrap() =
-                        CaptureStatus::Completed("패딩할 파일이 없습니다.".to_string());
+                        CaptureStatus::Completed("No files to pad.".to_string());
                 }
                 Ok(n) => {
                     *status.lock().unwrap() =
-                        CaptureStatus::Completed(format!("완료: {}개 파일 이름 변경", n));
+                        CaptureStatus::Completed(format!("Done: {} files renamed", n));
                 }
                 Err(e) => {
                     *status.lock().unwrap() = CaptureStatus::Error(format!("{}", e));

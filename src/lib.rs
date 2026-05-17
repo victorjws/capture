@@ -787,6 +787,7 @@ end tell
             None,
             duplicate_threshold,
             trim_bottom,
+            &|_| {},
         )
     }
 
@@ -814,6 +815,7 @@ end tell
             None,
             duplicate_threshold,
             trim_bottom,
+            &|_| {},
         )
     }
 
@@ -829,6 +831,7 @@ end tell
         stop_flag: Arc<Mutex<bool>>,
         duplicate_threshold: usize,
         trim_bottom: u32,
+        on_phase: impl Fn(&str),
     ) -> Result<RgbaImage> {
         self.capture_with_scroll_impl(
             overlap,
@@ -842,6 +845,7 @@ end tell
             Some(stop_flag),
             duplicate_threshold,
             trim_bottom,
+            &on_phase,
         )
     }
 
@@ -858,6 +862,7 @@ end tell
         stop_flag: Option<Arc<Mutex<bool>>>,
         duplicate_threshold: usize,
         trim_bottom: u32,
+        on_phase: &dyn Fn(&str),
     ) -> Result<RgbaImage> {
         self.log(
             log::Level::Info,
@@ -1055,6 +1060,7 @@ end tell
             );
         }
 
+        on_phase(&format!("Stitching... ({} frames)", images.len()));
         self.log(
             log::Level::Info,
             &format!("Stitching {} images...", images.len()),
@@ -1069,7 +1075,7 @@ end tell
 
         if image_count >= 2 {
             if let Some(fixed) =
-                self.fix_stitched_overlap(&result, screen_height, overlap, trim_bottom, false)
+                self.fix_stitched_overlap(&result, screen_height, overlap, 0, false)
             {
                 result = fixed;
             }
