@@ -108,7 +108,8 @@ impl ScreenCapture {
             &format!("Loaded: {} ({}x{})", input_path, img.width(), img.height()),
         );
 
-        let fixed_opt = self.fix_stitched_overlap(&img, screen_height, overlap, trim_bottom, half_seam);
+        let fixed_opt =
+            self.fix_stitched_overlap(&img, screen_height, overlap, trim_bottom, half_seam);
 
         let needs_save = fixed_opt.is_some() || trim_bottom > 0;
         if !needs_save {
@@ -1039,12 +1040,8 @@ end tell
 
         let mut overlaps = vec![overlap; images.len().saturating_sub(1)];
         for i in 0..overlaps.len() {
-            let actual = Self::detect_actual_overlap(
-                &images[i],
-                &images[i + 1],
-                overlap,
-                trim_bottom,
-            );
+            let actual =
+                Self::detect_actual_overlap(&images[i], &images[i + 1], overlap, trim_bottom);
             overlaps[i] = actual;
             self.log(
                 log::Level::Info,
