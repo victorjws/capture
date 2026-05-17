@@ -646,12 +646,7 @@ end tell
         img1.as_raw() == img2.as_raw()
     }
 
-    fn detect_actual_overlap(
-        img_prev: &RgbaImage,
-        img_last: &RgbaImage,
-        min_overlap: u32,
-        trim_bottom: u32,
-    ) -> u32 {
+    fn detect_actual_overlap(img_prev: &RgbaImage, img_last: &RgbaImage, min_overlap: u32) -> u32 {
         const MIN_MATCH_RATIO: f64 = 0.9;
         // A row counts as matching if this fraction of its pixels are identical.
         // Allows scrollbar or minor dynamic content to differ without breaking detection.
@@ -660,15 +655,13 @@ end tell
         let height = img_prev.height();
         let width = img_prev.width();
         let stride = (width * 4) as usize;
-        // Chrome rows at the bottom are identical across all frames — exclude them.
-        let effective_height = height.saturating_sub(trim_bottom);
-        let search_limit = effective_height.saturating_sub(min_overlap);
+        let search_limit = height.saturating_sub(min_overlap);
 
         let mut best_ratio = -1.0_f64;
         let mut best_k = search_limit;
 
         for k in 0..=search_limit {
-            let region_height = effective_height - k;
+            let region_height = height - k;
             let matching = (0..region_height)
                 .filter(|&j| {
                     let a = &img_prev.as_raw()
@@ -689,7 +682,7 @@ end tell
             let ratio = matching as f64 / region_height as f64;
 
             if ratio == 1.0 {
-                return effective_height - k;
+                return height - k;
             }
 
             if ratio > best_ratio {
@@ -699,7 +692,7 @@ end tell
         }
 
         if best_ratio >= MIN_MATCH_RATIO {
-            effective_height - best_k
+            height - best_k
         } else {
             min_overlap
         }
@@ -1044,9 +1037,15 @@ end tell
         }
 
         let mut overlaps = vec![overlap; images.len().saturating_sub(1)];
+        if !overlaps.is_empty() {
+            on_phase(&format!("Detecting overlaps... ({} pairs)", overlaps.len()));
+            self.log(
+                log::Level::Info,
+                &format!("Detecting overlaps for {} frame pairs...", overlaps.len()),
+            );
+        }
         for i in 0..overlaps.len() {
-            let actual =
-                Self::detect_actual_overlap(&images[i], &images[i + 1], overlap, trim_bottom);
+            let actual = Self::detect_actual_overlap(&images[i], &images[i + 1], overlap);
             overlaps[i] = actual;
             self.log(
                 log::Level::Info,
