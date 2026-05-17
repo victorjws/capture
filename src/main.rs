@@ -109,6 +109,12 @@ struct Args {
         help = "Pixels to trim from the bottom of the final image (e.g., remove webtoon footer UI)"
     )]
     trim_bottom: u32,
+
+    #[arg(
+        long,
+        help = "Fix images captured with the old overlap/2 seam (use for captures made before the full-overlap stitching update)"
+    )]
+    half_seam: bool,
 }
 
 fn list_presets() -> Result<()> {
@@ -198,6 +204,7 @@ fn main() -> Result<()> {
             screen_height,
             args.overlap,
             args.trim_bottom,
+            args.half_seam,
         )? {
             Some(path) => info!("Saved to {}", path),
             None => info!("No overlap detected — image looks correct."),

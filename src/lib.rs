@@ -97,6 +97,7 @@ impl ScreenCapture {
         screen_height: u32,
         overlap: u32,
         trim_bottom: u32,
+        half_seam: bool,
     ) -> Result<Option<String>> {
         let img = image::open(input_path)
             .map_err(|e| anyhow::anyhow!("Failed to open image: {}", e))?
@@ -107,7 +108,7 @@ impl ScreenCapture {
             &format!("Loaded: {} ({}x{})", input_path, img.width(), img.height()),
         );
 
-        let fixed_opt = self.fix_stitched_overlap(&img, screen_height, overlap, trim_bottom);
+        let fixed_opt = self.fix_stitched_overlap(&img, screen_height, overlap, trim_bottom, half_seam);
 
         let needs_save = fixed_opt.is_some() || trim_bottom > 0;
         if !needs_save {
@@ -166,6 +167,7 @@ impl ScreenCapture {
         screen_height: u32,
         overlap: u32,
         trim_bottom: u32,
+        half_seam: bool,
         on_progress: impl Fn(usize, usize, &str),
     ) -> Result<(usize, usize)> {
         const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif"];
@@ -226,6 +228,7 @@ impl ScreenCapture {
                 screen_height,
                 overlap,
                 trim_bottom,
+                half_seam,
             ) {
                 Ok(Some(_)) => fixed_count += 1,
                 Ok(None) => {
@@ -741,8 +744,8 @@ end tell
         let mut y_offset = 0u32;
         for (i, img) in images.iter().enumerate() {
             let overlap = if i > 0 { overlaps[i - 1] } else { 0 };
-            // Top half of overlap stays from the previous frame; start writing from the midpoint
-            let skip_rows = if i > 0 { overlap / 2 } else { 0 };
+            // Skip the overlapping rows entirely — the previous frame already covers them.
+            let skip_rows = if i > 0 { overlap } else { 0 };
 
             for y in skip_rows..single_height {
                 let target_y = (y_offset + y) as usize;
@@ -1035,21 +1038,22 @@ end tell
         }
 
         let mut overlaps = vec![overlap; images.len().saturating_sub(1)];
-        if images.len() >= 2 {
-            let actual_last = Self::detect_actual_overlap(
-                &images[images.len() - 2],
-                &images[images.len() - 1],
+        for i in 0..overlaps.len() {
+            let actual = Self::detect_actual_overlap(
+                &images[i],
+                &images[i + 1],
                 overlap,
                 trim_bottom,
             );
-            if let Some(last) = overlaps.last_mut() {
-                *last = actual_last;
-            }
+            overlaps[i] = actual;
             self.log(
                 log::Level::Info,
                 &format!(
-                    "Last frame overlap: {}px (fixed: {}px)",
-                    actual_last, overlap
+                    "Frame {}->{} overlap: {}px (configured: {}px)",
+                    i + 1,
+                    i + 2,
+                    actual,
+                    overlap
                 ),
             );
         }
@@ -1068,7 +1072,7 @@ end tell
 
         if image_count >= 2 {
             if let Some(fixed) =
-                self.fix_stitched_overlap(&result, screen_height, overlap, trim_bottom)
+                self.fix_stitched_overlap(&result, screen_height, overlap, trim_bottom, false)
             {
                 result = fixed;
             }
@@ -1095,6 +1099,7 @@ end tell
         screen_height: u32,
         overlap: u32,
         trim_bottom: u32,
+        half_seam: bool,
     ) -> Option<RgbaImage> {
         let total_h = img.height();
         let width = img.width();
@@ -1104,7 +1109,11 @@ end tell
             return None;
         }
 
-        let split_point = total_h - effective_screen_height + overlap / 2;
+        let split_point = if half_seam {
+            total_h - effective_screen_height + overlap / 2
+        } else {
+            total_h - effective_screen_height + overlap
+        };
         let max_k = effective_screen_height - overlap;
 
         let skip_amount = Self::detect_skip_amount(img, split_point, max_k);
@@ -1116,9 +1125,13 @@ end tell
             return None;
         }
 
-        let actual_overlap = overlap + skip_amount;
-        let y_offset_correct = total_h - screen_height - skip_amount;
-        let cut_row = y_offset_correct + actual_overlap / 2;
+        let cut_row = if half_seam {
+            let actual_overlap = overlap + skip_amount;
+            let y_offset_correct = total_h - screen_height - skip_amount;
+            y_offset_correct + actual_overlap / 2
+        } else {
+            split_point
+        };
         let src_resume = cut_row + skip_amount;
 
         if src_resume > total_h {
@@ -1128,8 +1141,8 @@ end tell
         self.log(
             log::Level::Info,
             &format!(
-                "Overlap detected: actual {}px vs configured {}px — removing {} rows at row {}",
-                actual_overlap, overlap, skip_amount, cut_row
+                "Overlap detected: {}px extra beyond configured {}px — removing {} rows at row {}",
+                skip_amount, overlap, skip_amount, cut_row
             ),
         );
 

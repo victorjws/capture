@@ -58,6 +58,7 @@ struct CaptureConfig {
 
     // Trim bottom settings (shared across capture and fix)
     trim_bottom: u32,
+    half_seam: bool,
 
     // Rename tab settings
     rename_folder_path: String,
@@ -89,6 +90,7 @@ impl Default for CaptureConfig {
             fix_output_filename: String::new(),
             fix_folder_mode: false,
             trim_bottom: 448,
+            half_seam: false,
             rename_folder_path: String::new(),
         }
     }
@@ -848,6 +850,7 @@ impl CaptureApp {
         let screen_height = self.config.fix_screen_height;
         let overlap = self.config.overlap;
         let trim_bottom = self.config.trim_bottom;
+        let half_seam = self.config.half_seam;
         let output_format = self.config.output_format.clone();
         let fix_output = self.config.fix_output_filename.clone();
         let folder_mode = self.config.fix_folder_mode;
@@ -871,6 +874,7 @@ impl CaptureApp {
                     screen_height,
                     overlap,
                     trim_bottom,
+                    half_seam,
                     &status,
                 );
             } else {
@@ -882,6 +886,7 @@ impl CaptureApp {
                     screen_height,
                     overlap,
                     trim_bottom,
+                    half_seam,
                     &status,
                 );
             }
@@ -898,6 +903,7 @@ impl CaptureApp {
         screen_height: u32,
         overlap: u32,
         trim_bottom: u32,
+        half_seam: bool,
         status: &Arc<Mutex<CaptureStatus>>,
     ) {
         let output_override = if fix_output.is_empty() {
@@ -912,6 +918,7 @@ impl CaptureApp {
             screen_height,
             overlap,
             trim_bottom,
+            half_seam,
         ) {
             Ok(Some(path)) => {
                 *status.lock().unwrap() = CaptureStatus::Completed(format!("Saved to: {}", path));
@@ -934,6 +941,7 @@ impl CaptureApp {
         screen_height: u32,
         overlap: u32,
         trim_bottom: u32,
+        half_seam: bool,
         status: &Arc<Mutex<CaptureStatus>>,
     ) {
         let result = capture.fix_images_in_folder(
@@ -942,6 +950,7 @@ impl CaptureApp {
             screen_height,
             overlap,
             trim_bottom,
+            half_seam,
             |cur, total, name| {
                 *status.lock().unwrap() =
                     CaptureStatus::Running(format!("[{}/{}] {}", cur, total, name));
@@ -1083,6 +1092,11 @@ impl CaptureApp {
                 ui.label("Trim bottom (px):");
                 ui.add(egui::DragValue::new(&mut self.config.trim_bottom).speed(1.0));
                 ui.label(egui::RichText::new("마지막 장 하단 잘라내기").weak());
+            });
+
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.config.half_seam, "Legacy seam (overlap/2)");
+                ui.label(egui::RichText::new("구버전 캡쳐 파일 수정 시 체크").weak());
             });
         });
 
