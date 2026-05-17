@@ -195,6 +195,7 @@ impl CaptureApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // Load fonts to support Unicode (including Korean, Japanese, Chinese, etc.)
         Self::setup_fonts(&cc.egui_ctx);
+        log::set_max_level(log::LevelFilter::Info);
         Self::default()
     }
 
