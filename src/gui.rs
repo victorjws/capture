@@ -105,6 +105,19 @@ enum CaptureStatus {
 }
 
 #[derive(Clone, Copy, PartialEq)]
+enum TrimMode {
+    BottomTrim,
+    MiddleCut,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum TrimLine {
+    BottomCut,
+    MiddleTop,
+    MiddleBottom,
+}
+
+#[derive(Clone, Copy, PartialEq)]
 enum Tab {
     Capture,
     Fix,
@@ -132,8 +145,14 @@ pub struct CaptureApp {
     trim_img_height: u32,
     trim_cut_y: u32,
     trim_preview_rows: u32,
+    trim_preview_start_y: u32,
     trim_output_path: String,
     trim_status: String,
+    trim_zoom: f32,
+    trim_mode: TrimMode,
+    trim_middle_top: u32,
+    trim_middle_bottom: u32,
+    trim_dragging_line: Option<TrimLine>,
 }
 
 impl Default for CaptureApp {
@@ -160,8 +179,14 @@ impl Default for CaptureApp {
             trim_img_height: 0,
             trim_cut_y: 0,
             trim_preview_rows: 800,
+            trim_preview_start_y: 0,
             trim_output_path: String::new(),
             trim_status: String::new(),
+            trim_zoom: 1.0,
+            trim_mode: TrimMode::BottomTrim,
+            trim_middle_top: 0,
+            trim_middle_bottom: 0,
+            trim_dragging_line: None,
         }
     }
 }
@@ -1177,19 +1202,31 @@ impl CaptureApp {
             }
         };
         let (w, h) = img.dimensions();
-        let start_y = h.saturating_sub(self.trim_preview_rows);
-        let preview_h = h - start_y;
+
+        // First-time load: reset state for this image
+        if self.trim_img_width != w || self.trim_img_height != h {
+            self.trim_img_width = w;
+            self.trim_img_height = h;
+            self.trim_cut_y = h;
+            self.trim_preview_start_y = h.saturating_sub(self.trim_preview_rows);
+            self.trim_middle_top = h / 3;
+            self.trim_middle_bottom = h * 2 / 3;
+        }
+
+        let start_y = self.trim_preview_start_y.min(h.saturating_sub(1));
+        let preview_h = (h - start_y).min(self.trim_preview_rows);
+
         let sub = image::imageops::crop_imm(&img, 0, start_y, w, preview_h).to_image();
         let color_img = egui::ColorImage::from_rgba_unmultiplied(
             [w as usize, preview_h as usize],
             sub.as_raw(),
         );
         self.trim_preview_texture =
-            Some(ctx.load_texture("trim_preview", color_img, Default::default()));
-        self.trim_img_width = w;
-        self.trim_img_height = h;
-        self.trim_cut_y = h;
-        self.trim_status = format!("Loaded: {}×{}", w, h);
+            Some(ctx.load_texture("trim_preview", color_img, egui::TextureOptions::NEAREST));
+        self.trim_status = format!(
+            "Loaded: {}×{}  (showing {}px from Y={})",
+            w, h, preview_h, start_y
+        );
     }
 
     fn apply_trim(&mut self) {
@@ -1217,23 +1254,78 @@ impl CaptureApp {
             self.trim_output_path.clone()
         };
         match cropped.save(&out) {
-            Ok(_) => {
-                self.trim_status = format!("Saved {}×{} → {}", w, cut, out);
-            }
+            Ok(_) => self.trim_status = format!("Saved {}×{} → {}", w, cut, out),
+            Err(e) => self.trim_status = format!("Error saving: {}", e),
+        }
+    }
+
+    fn apply_middle_cut(&mut self) {
+        if self.trim_input_path.is_empty() {
+            self.trim_status = "No input file specified.".to_string();
+            return;
+        }
+        let img = match image::open(&self.trim_input_path) {
+            Ok(i) => i.to_rgba8(),
             Err(e) => {
-                self.trim_status = format!("Error saving: {}", e);
+                self.trim_status = format!("Failed to open image: {}", e);
+                return;
             }
+        };
+        let (w, h) = img.dimensions();
+        let top_cut = self.trim_middle_top.min(h);
+        let bot_cut = self.trim_middle_bottom.min(h);
+        if top_cut >= bot_cut {
+            self.trim_status = "Top cut Y must be less than bottom cut Y.".to_string();
+            return;
+        }
+        let top_h = top_cut;
+        let bot_h = h - bot_cut;
+        if top_h + bot_h == 0 {
+            self.trim_status = "Nothing would remain after cut.".to_string();
+            return;
+        }
+        let top_section = image::imageops::crop_imm(&img, 0, 0, w, top_h).to_image();
+        let bot_section = image::imageops::crop_imm(&img, 0, bot_cut, w, bot_h).to_image();
+        let mut result = image::RgbaImage::new(w, top_h + bot_h);
+        image::imageops::replace(&mut result, &top_section, 0i64, 0i64);
+        image::imageops::replace(&mut result, &bot_section, 0i64, top_h as i64);
+        let out = if self.trim_output_path.is_empty() {
+            self.trim_input_path.clone()
+        } else {
+            self.trim_output_path.clone()
+        };
+        match result.save(&out) {
+            Ok(_) => {
+                self.trim_status = format!(
+                    "Saved {}×{} (removed {}px from Y={}..{}) → {}",
+                    w,
+                    top_h + bot_h,
+                    bot_cut - top_cut,
+                    top_cut,
+                    bot_cut,
+                    out
+                )
+            }
+            Err(e) => self.trim_status = format!("Error saving: {}", e),
         }
     }
 
     fn render_trim_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.heading("Trim Bottom");
+        ui.heading("Trim / Cut");
         ui.add_space(10.0);
 
         ui.group(|ui| {
+            // Mode
+            ui.horizontal(|ui| {
+                ui.label("Mode:");
+                ui.radio_value(&mut self.trim_mode, TrimMode::BottomTrim, "Bottom Trim");
+                ui.radio_value(&mut self.trim_mode, TrimMode::MiddleCut, "Middle Cut");
+            });
+            ui.separator();
+
             // Input file
             ui.horizontal(|ui| {
-                ui.label("Input image:");
+                ui.label("Input:");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.trim_input_path)
                         .hint_text("Path to image file")
@@ -1248,119 +1340,253 @@ impl CaptureApp {
                             self.trim_input_path = s.to_string();
                             self.trim_preview_texture = None;
                             self.trim_status = String::new();
+                            self.trim_img_width = 0;
+                            self.trim_img_height = 0;
                         }
                     }
                 }
             });
 
-            // Preview rows
+            // View controls
             ui.horizontal(|ui| {
                 ui.label("Preview rows:");
                 ui.add(
                     egui::DragValue::new(&mut self.trim_preview_rows)
-                        .range(100..=5000)
+                        .range(50..=10000)
                         .speed(10.0),
                 );
-                ui.label(egui::RichText::new("bottom pixels to display").weak());
+                ui.add_space(8.0);
+                ui.label("Start Y:");
+                let max_start = self.trim_img_height.saturating_sub(1);
+                ui.add(
+                    egui::DragValue::new(&mut self.trim_preview_start_y)
+                        .range(0..=max_start)
+                        .speed(10.0),
+                );
+            });
+
+            // Zoom controls
+            ui.horizontal(|ui| {
+                ui.label("Zoom:");
+                ui.add(egui::Slider::new(&mut self.trim_zoom, 0.25..=16.0).logarithmic(true));
+                if ui.small_button("1:1").clicked() {
+                    self.trim_zoom = 1.0;
+                }
+                if ui.small_button("Fit").clicked() && self.trim_img_width > 0 {
+                    let avail = ui.available_width() - 20.0;
+                    self.trim_zoom = (avail / self.trim_img_width as f32).max(0.1);
+                }
+                ui.label(format!("{:.2}×", self.trim_zoom));
             });
 
             if ui.button("Load Preview").clicked() {
-                let path = self.trim_input_path.clone();
-                let _ = path;
                 self.load_trim_preview(ctx);
             }
         });
 
         if !self.trim_status.is_empty() {
-            ui.add_space(5.0);
-            ui.label(&self.trim_status.clone());
+            ui.add_space(4.0);
+            ui.label(self.trim_status.clone());
         }
 
-        // Preview area — only when texture is loaded
-        if let Some(texture) = &self.trim_preview_texture {
-            let texture_id = texture.id();
+        // ---- Preview area (only when texture loaded) ----
+        if self.trim_preview_texture.is_some() {
+            let texture_id = self.trim_preview_texture.as_ref().unwrap().id();
             let img_w = self.trim_img_width;
             let img_h = self.trim_img_height;
+            let preview_start = self.trim_preview_start_y;
             let preview_rows = self.trim_preview_rows;
+            let preview_h = (img_h - preview_start.min(img_h)).min(preview_rows);
+            let zoom = self.trim_zoom;
 
-            let preview_start_y = img_h.saturating_sub(preview_rows);
-            let preview_h = img_h - preview_start_y;
+            ui.add_space(6.0);
 
-            ui.add_space(8.0);
-
-            // Info row
-            ui.horizontal(|ui| {
-                ui.label(format!(
-                    "{}×{}  |  Cut Y: {}  |  Removing: {}px from bottom",
-                    img_w,
-                    img_h,
-                    self.trim_cut_y,
-                    img_h.saturating_sub(self.trim_cut_y)
-                ));
-            });
-
-            // Fine-tune DragValue
-            ui.horizontal(|ui| {
-                ui.label("Cut Y:");
-                ui.add(
-                    egui::DragValue::new(&mut self.trim_cut_y)
-                        .range(0..=img_h)
-                        .speed(1.0),
-                );
-            });
-
-            ui.add_space(5.0);
-
-            // Scale image to fit available width, max 600px tall
-            let avail_w = ui.available_width();
-            let scale_w = avail_w / img_w as f32;
-            let scale_h = 600.0 / preview_h as f32;
-            let scale = scale_w.min(scale_h).min(1.0);
-            let display_w = img_w as f32 * scale;
-            let display_h = preview_h as f32 * scale;
-
-            let (rect, resp) =
-                ui.allocate_exact_size(egui::vec2(display_w, display_h), egui::Sense::drag());
-
-            if ui.is_rect_visible(rect) {
-                ui.painter().image(
-                    texture_id,
-                    rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
-
-                // Draw cut line
-                let cut_in_preview = self
-                    .trim_cut_y
-                    .saturating_sub(preview_start_y)
-                    .min(preview_h);
-                let cut_ratio = cut_in_preview as f32 / preview_h as f32;
-                let line_y = rect.top() + cut_ratio * rect.height();
-                ui.painter().hline(
-                    rect.left()..=rect.right(),
-                    line_y,
-                    egui::Stroke::new(2.0, egui::Color32::RED),
-                );
-
-                // Label on the cut line
-                ui.painter().text(
-                    egui::pos2(rect.left() + 4.0, line_y - 14.0),
-                    egui::Align2::LEFT_TOP,
-                    format!("Y={}", self.trim_cut_y),
-                    egui::FontId::monospace(11.0),
-                    egui::Color32::RED,
-                );
-            }
-
-            // Handle drag to move cut line
-            if resp.dragged() {
-                if let Some(pos) = resp.interact_pointer_pos() {
-                    let rel_y = (pos.y - rect.top()).clamp(0.0, rect.height());
-                    let ratio = rel_y / rect.height();
-                    self.trim_cut_y = preview_start_y + (ratio * preview_h as f32) as u32;
+            // Info + numeric controls
+            match self.trim_mode {
+                TrimMode::BottomTrim => {
+                    ui.label(format!(
+                        "{}×{}  |  Cut Y: {}  |  Keep: {}px  |  Remove: {}px",
+                        img_w,
+                        img_h,
+                        self.trim_cut_y,
+                        self.trim_cut_y,
+                        img_h.saturating_sub(self.trim_cut_y)
+                    ));
+                    ui.horizontal(|ui| {
+                        ui.label("Cut Y:");
+                        ui.add(
+                            egui::DragValue::new(&mut self.trim_cut_y)
+                                .range(0..=img_h)
+                                .speed(1.0),
+                        );
+                    });
+                }
+                TrimMode::MiddleCut => {
+                    ui.label(format!(
+                        "{}×{}  |  Remove Y {}..{} ({}px)  |  Result: {}px",
+                        img_w,
+                        img_h,
+                        self.trim_middle_top,
+                        self.trim_middle_bottom,
+                        self.trim_middle_bottom.saturating_sub(self.trim_middle_top),
+                        img_h.saturating_sub(
+                            self.trim_middle_bottom.saturating_sub(self.trim_middle_top)
+                        )
+                    ));
+                    ui.horizontal(|ui| {
+                        ui.label("Top Y:");
+                        let bot = self.trim_middle_bottom;
+                        ui.add(
+                            egui::DragValue::new(&mut self.trim_middle_top)
+                                .range(0..=bot)
+                                .speed(1.0),
+                        );
+                        ui.add_space(10.0);
+                        ui.label("Bottom Y:");
+                        let top = self.trim_middle_top;
+                        ui.add(
+                            egui::DragValue::new(&mut self.trim_middle_bottom)
+                                .range(top..=img_h)
+                                .speed(1.0),
+                        );
+                    });
                 }
             }
+
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("Drag lines to set cut points. Scroll to pan when zoomed.")
+                    .weak()
+                    .small(),
+            );
+            ui.add_space(4.0);
+
+            // Scrollable image view
+            let display_w = img_w as f32 * zoom;
+            let display_h = preview_h as f32 * zoom;
+
+            egui::ScrollArea::both().max_height(550.0).show(ui, |ui| {
+                let (rect, resp) =
+                    ui.allocate_exact_size(egui::vec2(display_w, display_h), egui::Sense::drag());
+
+                if ui.is_rect_visible(rect) {
+                    // Draw texture
+                    ui.painter().image(
+                        texture_id,
+                        rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+
+                    // abs image Y → screen Y
+                    let to_screen_y = |abs_y: u32| -> f32 {
+                        let in_preview = abs_y.saturating_sub(preview_start).min(preview_h) as f32;
+                        rect.top() + in_preview * zoom
+                    };
+
+                    match self.trim_mode {
+                        TrimMode::BottomTrim => {
+                            let line_y = to_screen_y(self.trim_cut_y);
+                            ui.painter().hline(
+                                rect.x_range(),
+                                line_y,
+                                egui::Stroke::new(2.0, egui::Color32::RED),
+                            );
+                            ui.painter().text(
+                                egui::pos2(rect.left() + 4.0, line_y - 15.0),
+                                egui::Align2::LEFT_TOP,
+                                format!("Y={}", self.trim_cut_y),
+                                egui::FontId::monospace(11.0),
+                                egui::Color32::RED,
+                            );
+                        }
+                        TrimMode::MiddleCut => {
+                            let top_y = to_screen_y(self.trim_middle_top);
+                            let bot_y = to_screen_y(self.trim_middle_bottom);
+
+                            // Shade removed zone
+                            if bot_y > top_y {
+                                let shade =
+                                    egui::Rect::from_x_y_ranges(rect.x_range(), top_y..=bot_y);
+                                ui.painter().rect_filled(
+                                    shade,
+                                    0.0,
+                                    egui::Color32::from_black_alpha(110),
+                                );
+                            }
+
+                            // Top line (yellow)
+                            ui.painter().hline(
+                                rect.x_range(),
+                                top_y,
+                                egui::Stroke::new(2.0, egui::Color32::YELLOW),
+                            );
+                            ui.painter().text(
+                                egui::pos2(rect.left() + 4.0, top_y + 2.0),
+                                egui::Align2::LEFT_TOP,
+                                format!("Top Y={}", self.trim_middle_top),
+                                egui::FontId::monospace(11.0),
+                                egui::Color32::YELLOW,
+                            );
+
+                            // Bottom line (red)
+                            ui.painter().hline(
+                                rect.x_range(),
+                                bot_y,
+                                egui::Stroke::new(2.0, egui::Color32::RED),
+                            );
+                            ui.painter().text(
+                                egui::pos2(rect.left() + 4.0, bot_y - 15.0),
+                                egui::Align2::LEFT_TOP,
+                                format!("Bot Y={}", self.trim_middle_bottom),
+                                egui::FontId::monospace(11.0),
+                                egui::Color32::RED,
+                            );
+                        }
+                    }
+                }
+
+                // Drag handling: pick nearest line on drag start
+                if resp.drag_started() {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        let rel_y = (pos.y - rect.top()) / zoom;
+                        let abs_y = preview_start + rel_y as u32;
+                        self.trim_dragging_line = Some(match self.trim_mode {
+                            TrimMode::BottomTrim => TrimLine::BottomCut,
+                            TrimMode::MiddleCut => {
+                                let d_top = (abs_y as f32 - self.trim_middle_top as f32).abs();
+                                let d_bot = (abs_y as f32 - self.trim_middle_bottom as f32).abs();
+                                if d_top <= d_bot {
+                                    TrimLine::MiddleTop
+                                } else {
+                                    TrimLine::MiddleBottom
+                                }
+                            }
+                        });
+                    }
+                }
+
+                if resp.dragged() {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        let rel_y = (pos.y - rect.top()).clamp(0.0, rect.height()) / zoom;
+                        let abs_y = (preview_start + rel_y as u32).min(img_h);
+                        match self.trim_dragging_line {
+                            Some(TrimLine::BottomCut) => self.trim_cut_y = abs_y,
+                            Some(TrimLine::MiddleTop) => {
+                                self.trim_middle_top = abs_y.min(self.trim_middle_bottom);
+                            }
+                            Some(TrimLine::MiddleBottom) => {
+                                self.trim_middle_bottom = abs_y.max(self.trim_middle_top);
+                            }
+                            None => {}
+                        }
+                    }
+                }
+
+                if !resp.dragged() && !resp.drag_started() {
+                    self.trim_dragging_line = None;
+                }
+            });
 
             ui.add_space(8.0);
 
@@ -1388,8 +1614,17 @@ impl CaptureApp {
 
             ui.add_space(8.0);
 
-            if ui.button("✂ Apply Trim").clicked() {
-                self.apply_trim();
+            match self.trim_mode {
+                TrimMode::BottomTrim => {
+                    if ui.button("✂ Apply Bottom Trim").clicked() {
+                        self.apply_trim();
+                    }
+                }
+                TrimMode::MiddleCut => {
+                    if ui.button("✂ Apply Middle Cut").clicked() {
+                        self.apply_middle_cut();
+                    }
+                }
             }
         }
     }
