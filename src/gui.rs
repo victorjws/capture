@@ -108,6 +108,7 @@ enum CaptureStatus {
 enum Tab {
     Capture,
     Fix,
+    Trim,
     Rename,
     Settings,
 }
@@ -123,6 +124,16 @@ pub struct CaptureApp {
     preset_names: Vec<String>,
     font_status: String,
     log_level: log::LevelFilter,
+
+    // Trim tab state
+    trim_input_path: String,
+    trim_preview_texture: Option<egui::TextureHandle>,
+    trim_img_width: u32,
+    trim_img_height: u32,
+    trim_cut_y: u32,
+    trim_preview_rows: u32,
+    trim_output_path: String,
+    trim_status: String,
 }
 
 impl Default for CaptureApp {
@@ -142,6 +153,15 @@ impl Default for CaptureApp {
             preset_names,
             font_status: "Using default font".to_string(),
             log_level: log::LevelFilter::Info,
+
+            trim_input_path: String::new(),
+            trim_preview_texture: None,
+            trim_img_width: 0,
+            trim_img_height: 0,
+            trim_cut_y: 0,
+            trim_preview_rows: 800,
+            trim_output_path: String::new(),
+            trim_status: String::new(),
         }
     }
 }
@@ -401,6 +421,7 @@ impl eframe::App for CaptureApp {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.current_tab, Tab::Capture, "📷 Capture");
             ui.selectable_value(&mut self.current_tab, Tab::Fix, "🔧 Fix");
+            ui.selectable_value(&mut self.current_tab, Tab::Trim, "✂ Trim");
             ui.selectable_value(&mut self.current_tab, Tab::Rename, "🔢 Rename");
             ui.selectable_value(&mut self.current_tab, Tab::Settings, "⚙ Settings");
         });
@@ -411,6 +432,7 @@ impl eframe::App for CaptureApp {
         egui::ScrollArea::vertical().show(ui, |ui| match self.current_tab {
             Tab::Capture => self.render_capture_tab(ui, &ctx),
             Tab::Fix => self.render_fix_tab(ui, &ctx),
+            Tab::Trim => self.render_trim_tab(ui, &ctx),
             Tab::Rename => self.render_rename_tab(ui, &ctx),
             Tab::Settings => self.render_settings_tab(ui, &ctx),
         });
@@ -1140,6 +1162,236 @@ impl CaptureApp {
                     }
                 });
         });
+    }
+
+    fn load_trim_preview(&mut self, ctx: &egui::Context) {
+        if self.trim_input_path.is_empty() {
+            self.trim_status = "No input file specified.".to_string();
+            return;
+        }
+        let img = match image::open(&self.trim_input_path) {
+            Ok(i) => i.to_rgba8(),
+            Err(e) => {
+                self.trim_status = format!("Failed to open image: {}", e);
+                return;
+            }
+        };
+        let (w, h) = img.dimensions();
+        let start_y = h.saturating_sub(self.trim_preview_rows);
+        let preview_h = h - start_y;
+        let sub = image::imageops::crop_imm(&img, 0, start_y, w, preview_h).to_image();
+        let color_img = egui::ColorImage::from_rgba_unmultiplied(
+            [w as usize, preview_h as usize],
+            sub.as_raw(),
+        );
+        self.trim_preview_texture =
+            Some(ctx.load_texture("trim_preview", color_img, Default::default()));
+        self.trim_img_width = w;
+        self.trim_img_height = h;
+        self.trim_cut_y = h;
+        self.trim_status = format!("Loaded: {}×{}", w, h);
+    }
+
+    fn apply_trim(&mut self) {
+        if self.trim_input_path.is_empty() {
+            self.trim_status = "No input file specified.".to_string();
+            return;
+        }
+        let img = match image::open(&self.trim_input_path) {
+            Ok(i) => i.to_rgba8(),
+            Err(e) => {
+                self.trim_status = format!("Failed to open image: {}", e);
+                return;
+            }
+        };
+        let (w, h) = img.dimensions();
+        let cut = self.trim_cut_y.min(h);
+        if cut == 0 {
+            self.trim_status = "Cut Y is 0 — nothing to save.".to_string();
+            return;
+        }
+        let cropped = image::imageops::crop_imm(&img, 0, 0, w, cut).to_image();
+        let out = if self.trim_output_path.is_empty() {
+            self.trim_input_path.clone()
+        } else {
+            self.trim_output_path.clone()
+        };
+        match cropped.save(&out) {
+            Ok(_) => {
+                self.trim_status = format!("Saved {}×{} → {}", w, cut, out);
+            }
+            Err(e) => {
+                self.trim_status = format!("Error saving: {}", e);
+            }
+        }
+    }
+
+    fn render_trim_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.heading("Trim Bottom");
+        ui.add_space(10.0);
+
+        ui.group(|ui| {
+            // Input file
+            ui.horizontal(|ui| {
+                ui.label("Input image:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.trim_input_path)
+                        .hint_text("Path to image file")
+                        .desired_width(ui.available_width() - 90.0),
+                );
+                if ui.button("Browse...").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "tiff"])
+                        .pick_file()
+                    {
+                        if let Some(s) = path.to_str() {
+                            self.trim_input_path = s.to_string();
+                            self.trim_preview_texture = None;
+                            self.trim_status = String::new();
+                        }
+                    }
+                }
+            });
+
+            // Preview rows
+            ui.horizontal(|ui| {
+                ui.label("Preview rows:");
+                ui.add(
+                    egui::DragValue::new(&mut self.trim_preview_rows)
+                        .range(100..=5000)
+                        .speed(10.0),
+                );
+                ui.label(egui::RichText::new("bottom pixels to display").weak());
+            });
+
+            if ui.button("Load Preview").clicked() {
+                let path = self.trim_input_path.clone();
+                let _ = path;
+                self.load_trim_preview(ctx);
+            }
+        });
+
+        if !self.trim_status.is_empty() {
+            ui.add_space(5.0);
+            ui.label(&self.trim_status.clone());
+        }
+
+        // Preview area — only when texture is loaded
+        if let Some(texture) = &self.trim_preview_texture {
+            let texture_id = texture.id();
+            let img_w = self.trim_img_width;
+            let img_h = self.trim_img_height;
+            let preview_rows = self.trim_preview_rows;
+
+            let preview_start_y = img_h.saturating_sub(preview_rows);
+            let preview_h = img_h - preview_start_y;
+
+            ui.add_space(8.0);
+
+            // Info row
+            ui.horizontal(|ui| {
+                ui.label(format!(
+                    "{}×{}  |  Cut Y: {}  |  Removing: {}px from bottom",
+                    img_w,
+                    img_h,
+                    self.trim_cut_y,
+                    img_h.saturating_sub(self.trim_cut_y)
+                ));
+            });
+
+            // Fine-tune DragValue
+            ui.horizontal(|ui| {
+                ui.label("Cut Y:");
+                ui.add(
+                    egui::DragValue::new(&mut self.trim_cut_y)
+                        .range(0..=img_h)
+                        .speed(1.0),
+                );
+            });
+
+            ui.add_space(5.0);
+
+            // Scale image to fit available width, max 600px tall
+            let avail_w = ui.available_width();
+            let scale_w = avail_w / img_w as f32;
+            let scale_h = 600.0 / preview_h as f32;
+            let scale = scale_w.min(scale_h).min(1.0);
+            let display_w = img_w as f32 * scale;
+            let display_h = preview_h as f32 * scale;
+
+            let (rect, resp) =
+                ui.allocate_exact_size(egui::vec2(display_w, display_h), egui::Sense::drag());
+
+            if ui.is_rect_visible(rect) {
+                ui.painter().image(
+                    texture_id,
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+
+                // Draw cut line
+                let cut_in_preview = self
+                    .trim_cut_y
+                    .saturating_sub(preview_start_y)
+                    .min(preview_h);
+                let cut_ratio = cut_in_preview as f32 / preview_h as f32;
+                let line_y = rect.top() + cut_ratio * rect.height();
+                ui.painter().hline(
+                    rect.left()..=rect.right(),
+                    line_y,
+                    egui::Stroke::new(2.0, egui::Color32::RED),
+                );
+
+                // Label on the cut line
+                ui.painter().text(
+                    egui::pos2(rect.left() + 4.0, line_y - 14.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("Y={}", self.trim_cut_y),
+                    egui::FontId::monospace(11.0),
+                    egui::Color32::RED,
+                );
+            }
+
+            // Handle drag to move cut line
+            if resp.dragged() {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    let rel_y = (pos.y - rect.top()).clamp(0.0, rect.height());
+                    let ratio = rel_y / rect.height();
+                    self.trim_cut_y = preview_start_y + (ratio * preview_h as f32) as u32;
+                }
+            }
+
+            ui.add_space(8.0);
+
+            // Output path
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Output:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.trim_output_path)
+                            .hint_text("Leave empty to overwrite original")
+                            .desired_width(ui.available_width() - 90.0),
+                    );
+                    if ui.button("Browse...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "tiff"])
+                            .save_file()
+                        {
+                            if let Some(s) = path.to_str() {
+                                self.trim_output_path = s.to_string();
+                            }
+                        }
+                    }
+                });
+            });
+
+            ui.add_space(8.0);
+
+            if ui.button("✂ Apply Trim").clicked() {
+                self.apply_trim();
+            }
+        }
     }
 
     fn render_rename_tab(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
