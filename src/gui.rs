@@ -77,12 +77,12 @@ impl Default for CaptureConfig {
             duplicate_threshold: defaults::DUPLICATE_THRESHOLD,
             window_only: false,
             crop_enabled: false,
-            use_preset: false,
-            selected_preset: String::new(),
-            crop_x: defaults::CROP_X,
-            crop_y: defaults::CROP_Y,
-            crop_width: defaults::CROP_WIDTH,
-            crop_height: defaults::CROP_HEIGHT,
+            use_preset: true,
+            selected_preset: "naver-series".to_string(),
+            crop_x: 607,
+            crop_y: 23,
+            crop_width: 690,
+            crop_height: 1007,
             font_path: String::new(),
             status_color: [255, 255, 0], // Yellow by default
             fix_input_path: String::new(),
@@ -752,7 +752,7 @@ impl CaptureApp {
         ui.group(|ui| {
             ui.label("Font Settings");
 
-            ui.horizontal(|ui| {
+            let font_row = ui.horizontal(|ui| {
                 ui.label("Font file:");
                 ui.add(egui::TextEdit::singleline(&mut self.config.font_path)
                     .desired_width(ui.available_width() - 80.0));
@@ -768,6 +768,25 @@ impl CaptureApp {
                     }
                 }
             });
+            let hover_pos = ctx.input(|i| i.pointer.hover_pos());
+            if !ctx.input(|i| i.raw.hovered_files.is_empty())
+                && hover_pos.map_or(false, |p| font_row.response.rect.contains(p))
+            {
+                ui.painter().rect_stroke(
+                    font_row.response.rect,
+                    4.0,
+                    egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+                    egui::StrokeKind::Outside,
+                );
+            }
+            let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+            if !dropped.is_empty()
+                && hover_pos.map_or(false, |p| font_row.response.rect.contains(p))
+            {
+                if let Some(path) = dropped[0].path.as_ref().and_then(|p| p.to_str()) {
+                    self.config.font_path = path.to_string();
+                }
+            }
 
             ui.horizontal(|ui| {
                 if ui.button("Load Font").clicked() {
@@ -887,6 +906,17 @@ impl CaptureApp {
                 })
                 .weak(),
             );
+        });
+
+        ui.add_space(10.0);
+
+        ui.group(|ui| {
+            ui.label("Reset Configuration");
+            ui.add_space(5.0);
+            if ui.button("Reset to Defaults").clicked() {
+                self.config = CaptureConfig::default();
+            }
+            ui.label(egui::RichText::new("Resets all settings to their default values.").weak());
         });
     }
 }
@@ -1075,7 +1105,7 @@ impl CaptureApp {
             ui.separator();
 
             // Input path
-            ui.horizontal(|ui| {
+            let fix_input_row = ui.horizontal(|ui| {
                 ui.label(if self.config.fix_folder_mode {
                     "Folder:"
                 } else {
@@ -1107,6 +1137,25 @@ impl CaptureApp {
                     }
                 }
             });
+            let hover_pos = ctx.input(|i| i.pointer.hover_pos());
+            if !ctx.input(|i| i.raw.hovered_files.is_empty())
+                && hover_pos.map_or(false, |p| fix_input_row.response.rect.contains(p))
+            {
+                ui.painter().rect_stroke(
+                    fix_input_row.response.rect,
+                    4.0,
+                    egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+                    egui::StrokeKind::Outside,
+                );
+            }
+            let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+            if !dropped.is_empty()
+                && hover_pos.map_or(false, |p| fix_input_row.response.rect.contains(p))
+            {
+                if let Some(path) = dropped[0].path.as_ref().and_then(|p| p.to_str()) {
+                    self.config.fix_input_path = path.to_string();
+                }
+            }
 
             // Output filename (single file mode only)
             if !self.config.fix_folder_mode {
@@ -1325,7 +1374,7 @@ impl CaptureApp {
             ui.separator();
 
             // Input file
-            ui.horizontal(|ui| {
+            let trim_input_row = ui.horizontal(|ui| {
                 ui.label("Input:");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.trim_input_path)
@@ -1347,6 +1396,29 @@ impl CaptureApp {
                     }
                 }
             });
+            let hover_pos = ctx.input(|i| i.pointer.hover_pos());
+            if !ctx.input(|i| i.raw.hovered_files.is_empty())
+                && hover_pos.map_or(false, |p| trim_input_row.response.rect.contains(p))
+            {
+                ui.painter().rect_stroke(
+                    trim_input_row.response.rect,
+                    4.0,
+                    egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+                    egui::StrokeKind::Outside,
+                );
+            }
+            let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+            if !dropped.is_empty()
+                && hover_pos.map_or(false, |p| trim_input_row.response.rect.contains(p))
+            {
+                if let Some(path) = dropped[0].path.as_ref().and_then(|p| p.to_str()) {
+                    self.trim_input_path = path.to_string();
+                    self.trim_preview_texture = None;
+                    self.trim_status = String::new();
+                    self.trim_img_width = 0;
+                    self.trim_img_height = 0;
+                }
+            }
 
             // View controls
             ui.horizontal(|ui| {
@@ -1387,7 +1459,12 @@ impl CaptureApp {
 
         if !self.trim_status.is_empty() {
             ui.add_space(4.0);
-            ui.label(self.trim_status.clone());
+            let color = egui::Color32::from_rgb(
+                self.config.status_color[0],
+                self.config.status_color[1],
+                self.config.status_color[2],
+            );
+            ui.colored_label(color, self.trim_status.clone());
         }
 
         // ---- Preview area (only when texture loaded) ----
