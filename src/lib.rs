@@ -1037,22 +1037,16 @@ end tell
         }
 
         let mut overlaps = vec![overlap; images.len().saturating_sub(1)];
-        if !overlaps.is_empty() {
-            on_phase(&format!("Detecting overlaps... ({} pairs)", overlaps.len()));
-            self.log(
-                log::Level::Info,
-                &format!("Detecting overlaps for {} frame pairs...", overlaps.len()),
-            );
-        }
-        for i in 0..overlaps.len() {
-            let actual = Self::detect_actual_overlap(&images[i], &images[i + 1], overlap);
-            overlaps[i] = actual;
+        if let Some(last_i) = overlaps.len().checked_sub(1) {
+            on_phase("Detecting last frame overlap...");
+            let actual = Self::detect_actual_overlap(&images[last_i], &images[last_i + 1], overlap);
+            overlaps[last_i] = actual;
             self.log(
                 log::Level::Info,
                 &format!(
                     "Frame {}->{} overlap: {}px (configured: {}px)",
-                    i + 1,
-                    i + 2,
+                    last_i + 1,
+                    last_i + 2,
                     actual,
                     overlap
                 ),
