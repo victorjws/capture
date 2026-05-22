@@ -59,6 +59,7 @@ struct CaptureConfig {
     // Trim bottom settings (shared across capture and fix)
     trim_bottom: u32,
     half_seam: bool,
+    best_overlap: bool,
 
     // Rename tab settings
     rename_folder_path: String,
@@ -91,6 +92,7 @@ impl Default for CaptureConfig {
             fix_folder_mode: false,
             trim_bottom: 448,
             half_seam: false,
+            best_overlap: true,
             rename_folder_path: String::new(),
         }
     }
@@ -429,6 +431,7 @@ impl CaptureApp {
             should_stop.clone(),
             config.duplicate_threshold,
             config.trim_bottom,
+            config.best_overlap,
             on_phase,
         )?;
 
@@ -551,6 +554,11 @@ impl CaptureApp {
                     &mut self.config.overlap,
                     gui_const::OVERLAP_MIN..=gui_const::OVERLAP_MAX,
                 ));
+            });
+
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.config.best_overlap, "Best-match overlap detect");
+                ui.label(egui::RichText::new("picks highest match ratio for last frame").weak());
             });
 
             ui.horizontal(|ui| {

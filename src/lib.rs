@@ -646,7 +646,12 @@ end tell
         img1.as_raw() == img2.as_raw()
     }
 
-    fn detect_actual_overlap(img_prev: &RgbaImage, img_last: &RgbaImage, min_overlap: u32) -> u32 {
+    fn detect_actual_overlap(
+        img_prev: &RgbaImage,
+        img_last: &RgbaImage,
+        min_overlap: u32,
+        use_best_match: bool,
+    ) -> u32 {
         const MIN_MATCH_RATIO: f64 = 0.9;
         // A row counts as matching if this fraction of its pixels are identical.
         // Allows scrollbar or minor dynamic content to differ without breaking detection.
@@ -691,10 +696,20 @@ end tell
             }
         }
 
-        if best_ratio >= MIN_MATCH_RATIO {
-            height - best_k
+        if use_best_match {
+            // best_k==0 means the fixed bottom region (e.g. nav bar) dominated the match
+            // rather than actual content overlap — fall back to configured overlap.
+            if best_k > 0 {
+                height - best_k
+            } else {
+                min_overlap
+            }
         } else {
-            min_overlap
+            if best_ratio >= MIN_MATCH_RATIO {
+                height - best_k
+            } else {
+                min_overlap
+            }
         }
     }
 
@@ -767,6 +782,7 @@ end tell
         scroll_delay_ms: u64,
         duplicate_threshold: usize,
         trim_bottom: u32,
+        best_overlap: bool,
     ) -> Result<RgbaImage> {
         self.capture_with_scroll_impl(
             overlap,
@@ -780,6 +796,7 @@ end tell
             None,
             duplicate_threshold,
             trim_bottom,
+            best_overlap,
             &|_| {},
         )
     }
@@ -795,6 +812,7 @@ end tell
         scroll_delay_ms: u64,
         duplicate_threshold: usize,
         trim_bottom: u32,
+        best_overlap: bool,
     ) -> Result<RgbaImage> {
         self.capture_with_scroll_impl(
             overlap,
@@ -808,6 +826,7 @@ end tell
             None,
             duplicate_threshold,
             trim_bottom,
+            best_overlap,
             &|_| {},
         )
     }
@@ -824,6 +843,7 @@ end tell
         stop_flag: Arc<Mutex<bool>>,
         duplicate_threshold: usize,
         trim_bottom: u32,
+        best_overlap: bool,
         on_phase: impl Fn(&str),
     ) -> Result<RgbaImage> {
         self.capture_with_scroll_impl(
@@ -838,6 +858,7 @@ end tell
             Some(stop_flag),
             duplicate_threshold,
             trim_bottom,
+            best_overlap,
             &on_phase,
         )
     }
@@ -855,6 +876,7 @@ end tell
         stop_flag: Option<Arc<Mutex<bool>>>,
         duplicate_threshold: usize,
         trim_bottom: u32,
+        best_overlap: bool,
         on_phase: &dyn Fn(&str),
     ) -> Result<RgbaImage> {
         self.log(
@@ -1039,7 +1061,7 @@ end tell
         let mut overlaps = vec![overlap; images.len().saturating_sub(1)];
         if let Some(last_i) = overlaps.len().checked_sub(1) {
             on_phase("Detecting last frame overlap...");
-            let actual = Self::detect_actual_overlap(&images[last_i], &images[last_i + 1], overlap);
+            let actual = Self::detect_actual_overlap(&images[last_i], &images[last_i + 1], overlap, best_overlap);
             overlaps[last_i] = actual;
             self.log(
                 log::Level::Info,

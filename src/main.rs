@@ -115,6 +115,12 @@ struct Args {
         help = "Fix images captured with the old overlap/2 seam (use for captures made before the full-overlap stitching update)"
     )]
     half_seam: bool,
+
+    #[arg(
+        long,
+        help = "Use best-match overlap detection for the last frame: picks the k with the highest match ratio instead of requiring 90%"
+    )]
+    best_overlap: bool,
 }
 
 fn list_presets() -> Result<()> {
@@ -266,6 +272,7 @@ fn main() -> Result<()> {
                 args.scroll_delay,
                 args.duplicate_threshold,
                 args.trim_bottom,
+                args.best_overlap,
             )?;
             result_image.save(&output_path)?;
             info!("Saved to {}", output_path);
@@ -293,6 +300,7 @@ fn main() -> Result<()> {
         args.scroll_delay,
         args.duplicate_threshold,
         args.trim_bottom,
+        args.best_overlap,
     )?;
 
     result_image.save(&output_path)?;
