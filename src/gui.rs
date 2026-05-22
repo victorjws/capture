@@ -92,7 +92,7 @@ impl Default for CaptureConfig {
             fix_folder_mode: false,
             trim_bottom: 448,
             half_seam: false,
-            best_overlap: true,
+            best_overlap: false,
             rename_folder_path: String::new(),
         }
     }
