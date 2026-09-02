@@ -186,8 +186,12 @@ Building natively on Linux needs those same packages:
 
 ```bash
 sudo apt-get install pkg-config libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
-    libxcb-xfixes0-dev libxkbcommon-dev libdbus-1-dev libwayland-dev libxdo-dev
+    libxcb-xfixes0-dev libxkbcommon-dev libdbus-1-dev libwayland-dev libxdo-dev \
+    libegl1-mesa-dev libgbm-dev libdrm-dev libpipewire-0.3-dev clang
 ```
+
+The EGL, GBM, DRM and PipeWire packages are what `xcap` links against for
+Wayland screen capture.
 
 ## Requirements
 

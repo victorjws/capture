@@ -7,7 +7,7 @@ use constants::CaptureTimings;
 use constants::timing;
 use crossterm::event::{Event, KeyCode, KeyEvent, poll, read};
 use enigo::{Enigo, Key, Keyboard, Settings};
-use image::{ImageBuffer, Rgba, RgbaImage};
+use image::{ImageBuffer, RgbaImage};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -597,28 +597,19 @@ end tell
     }
 
     fn capture_screen(&self, crop_region: Option<(i32, i32, i32, i32)>) -> Result<RgbaImage> {
-        // Try screenshots crate first (more compatible)
-        let screen = screenshots::Screen::all()
-            .map_err(|e| anyhow::anyhow!("Failed to get screens: {}", e))?
+        let monitor = xcap::Monitor::all()
+            .map_err(|e| anyhow::anyhow!("Failed to get monitors: {}", e))?
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow::anyhow!("No screen found"))?;
+            .ok_or_else(|| anyhow::anyhow!("No monitor found"))?;
 
-        let captured_image = screen
-            .capture()
+        // xcap builds on the same image version we do, so this needs no conversion.
+        let rgba_image = monitor
+            .capture_image()
             .map_err(|e| anyhow::anyhow!("Failed to capture screen: {}", e))?;
 
-        // screenshots crate uses image 0.24, we use 0.25
-        // Convert pixel data manually to avoid version conflict
-        let width = captured_image.width();
-        let height = captured_image.height();
-
-        let mut rgba_image = RgbaImage::new(width, height);
-        for (x, y, pixel) in captured_image.enumerate_pixels() {
-            // Manually copy RGBA values
-            let rgba = Rgba([pixel[0], pixel[1], pixel[2], pixel[3]]);
-            rgba_image.put_pixel(x, y, rgba);
-        }
+        let width = rgba_image.width();
+        let height = rgba_image.height();
 
         // Apply crop if specified
         if let Some((crop_x, crop_y, crop_w, crop_h)) = crop_region {
