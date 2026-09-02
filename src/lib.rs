@@ -384,6 +384,13 @@ end tell
         }
     }
 
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    fn get_mouse_position() -> Result<(i32, i32)> {
+        Err(anyhow::anyhow!(
+            "Reading the mouse position is not supported on this platform. Pass the region explicitly with --crop 'x,y,width,height'."
+        ))
+    }
+
     #[cfg(target_os = "macos")]
     fn enable_zoom() -> Result<()> {
         let script = r#"
@@ -402,6 +409,12 @@ end tell
     fn enable_zoom() -> Result<()> {
         // Launch Windows Magnifier
         let _ = std::process::Command::new("magnify.exe").spawn();
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    fn enable_zoom() -> Result<()> {
+        // No portable magnifier to launch; region selection still works without it.
         Ok(())
     }
 
@@ -560,6 +573,13 @@ end tell
             }
         }
         Ok(None)
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    fn get_focused_window_bounds(&self) -> Result<Option<(i32, i32, i32, i32)>> {
+        Err(anyhow::anyhow!(
+            "--window-only is not supported on this platform. Pass the region explicitly with --crop 'x,y,width,height'."
+        ))
     }
 
     fn capture_screen(&self, crop_region: Option<(i32, i32, i32, i32)>) -> Result<RgbaImage> {
@@ -1061,7 +1081,12 @@ end tell
         let mut overlaps = vec![overlap; images.len().saturating_sub(1)];
         if let Some(last_i) = overlaps.len().checked_sub(1) {
             on_phase("Detecting last frame overlap...");
-            let actual = Self::detect_actual_overlap(&images[last_i], &images[last_i + 1], overlap, best_overlap);
+            let actual = Self::detect_actual_overlap(
+                &images[last_i],
+                &images[last_i + 1],
+                overlap,
+                best_overlap,
+            );
             overlaps[last_i] = actual;
             self.log(
                 log::Level::Info,

@@ -149,6 +149,25 @@ NanumGothic and Noto Sans Symbols are both distributed under the
 - Uses Windows Magnifier for region selection
 - Supports focused window detection
 
+### Linux
+- Full-screen capture and `--crop 'x,y,width,height'` work
+- Interactive region selection and `--window-only` are not implemented; both
+  report an error telling you to pass `--crop` instead
+
+Cross-compile with [`cross`](https://github.com/cross-rs/cross), which installs the
+required X11/Wayland development packages per `Cross.toml`:
+
+```bash
+cross build --release --target x86_64-unknown-linux-gnu
+```
+
+Building natively on Linux needs those same packages:
+
+```bash
+sudo apt-get install pkg-config libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
+    libxcb-xfixes0-dev libxkbcommon-dev libdbus-1-dev libwayland-dev libxdo-dev
+```
+
 ## Requirements
 
 - Rust 1.70+
