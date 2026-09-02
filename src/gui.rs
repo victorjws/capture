@@ -172,7 +172,7 @@ impl Default for CaptureApp {
             logs: Arc::new(Mutex::new(Vec::new())),
             presets,
             preset_names,
-            font_status: "Using default font".to_string(),
+            font_status: "Using bundled NanumGothic".to_string(),
             log_level: log::LevelFilter::Info,
 
             trim_input_path: String::new(),
@@ -201,6 +201,31 @@ impl CaptureApp {
         Self::default()
     }
 
+    /// Font definitions with the bundled fallbacks installed: NanumGothic for
+    /// Hangul and Noto Sans Symbols for symbols the default fonts lack. Both are
+    /// appended as fallbacks so the default fonts still handle Latin first.
+    fn base_font_definitions() -> egui::FontDefinitions {
+        let mut fonts = egui::FontDefinitions::default();
+
+        fonts.font_data.insert(
+            "korean".to_owned(),
+            egui::FontData::from_static(include_bytes!("../assets/NanumGothic.ttf")).into(),
+        );
+        fonts.font_data.insert(
+            "symbols".to_owned(),
+            egui::FontData::from_static(include_bytes!("../assets/NotoSansSymbols-Regular.ttf"))
+                .into(),
+        );
+
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            let list = fonts.families.entry(family).or_default();
+            list.push("korean".to_owned());
+            list.push("symbols".to_owned());
+        }
+
+        fonts
+    }
+
     fn setup_fonts(ctx: &egui::Context) {
         // Try to load font from user-specified or default location
         let mut font_paths: Vec<String> = gui_const::DEFAULT_FONT_PATHS
@@ -213,7 +238,8 @@ impl CaptureApp {
             font_paths.push(config_path);
         }
 
-        let mut fonts = egui::FontDefinitions::default();
+        // Start from the bundled fonts so Hangul renders even without an override.
+        let mut fonts = Self::base_font_definitions();
         let mut font_loaded = false;
 
         for path in font_paths.iter() {
@@ -242,14 +268,7 @@ impl CaptureApp {
         }
 
         if !font_loaded {
-            log::warn!("No custom font found. Using default font.");
-            log::warn!(
-                "For Unicode support (Korean, Japanese, Chinese, etc.), place NotoSansKR-Regular.ttf in one of: {}{}",
-                gui_const::DEFAULT_FONT_PATHS.join(", "),
-                gui_const::get_config_font_path()
-                    .map(|p| format!(", {}", p))
-                    .unwrap_or_default()
-            );
+            log::info!("No font override found. Using bundled NanumGothic.");
         }
 
         ctx.set_fonts(fonts);
@@ -263,7 +282,8 @@ impl CaptureApp {
 
         match std::fs::read(path) {
             Ok(font_data) => {
-                let mut fonts = egui::FontDefinitions::default();
+                // Layer the override on top of the bundled fonts so they stay as fallbacks.
+                let mut fonts = Self::base_font_definitions();
 
                 fonts.font_data.insert(
                     "custom_font".to_owned(),
@@ -448,11 +468,11 @@ impl eframe::App for CaptureApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.current_tab, Tab::Capture, "📷 Capture");
-            ui.selectable_value(&mut self.current_tab, Tab::Fix, "🔧 Fix");
-            ui.selectable_value(&mut self.current_tab, Tab::Trim, "✂ Trim");
-            ui.selectable_value(&mut self.current_tab, Tab::Rename, "🔢 Rename");
-            ui.selectable_value(&mut self.current_tab, Tab::Settings, "⚙ Settings");
+            ui.selectable_value(&mut self.current_tab, Tab::Capture, "Capture");
+            ui.selectable_value(&mut self.current_tab, Tab::Fix, "Fix");
+            ui.selectable_value(&mut self.current_tab, Tab::Trim, "Trim");
+            ui.selectable_value(&mut self.current_tab, Tab::Rename, "Rename");
+            ui.selectable_value(&mut self.current_tab, Tab::Settings, "Settings");
         });
 
         ui.separator();
@@ -486,14 +506,14 @@ impl CaptureApp {
                     self.config.status_color[1],
                     self.config.status_color[2],
                 );
-                ui.colored_label(color, format!("⏳ {}", msg));
+                ui.colored_label(color, format!("... {}", msg));
                 ctx.request_repaint(); // Keep updating while running
             }
             CaptureStatus::Completed(msg) => {
-                ui.colored_label(egui::Color32::GREEN, format!("✓ {}", msg));
+                ui.colored_label(egui::Color32::GREEN, format!("[OK] {}", msg));
             }
             CaptureStatus::Error(msg) => {
-                ui.colored_label(egui::Color32::RED, format!("✗ {}", msg));
+                ui.colored_label(egui::Color32::RED, format!("[ERROR] {}", msg));
             }
         }
 
@@ -503,14 +523,14 @@ impl CaptureApp {
         let is_running = *self.is_running.lock().unwrap();
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(!is_running, egui::Button::new("▶ Start Capture"))
+                .add_enabled(!is_running, egui::Button::new("Start Capture"))
                 .clicked()
             {
                 self.start_capture();
             }
 
             if ui
-                .add_enabled(is_running, egui::Button::new("⏹ Stop Capture"))
+                .add_enabled(is_running, egui::Button::new("Stop Capture"))
                 .clicked()
             {
                 self.stop_capture();
@@ -707,7 +727,7 @@ impl CaptureApp {
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.label("Equivalent CLI command:");
-                if ui.button("📋 Copy").clicked() {
+                if ui.button("Copy").clicked() {
                     let cmd = self.generate_cli_command();
                     ui.ctx().copy_text(cmd);
                 }
@@ -791,7 +811,7 @@ impl CaptureApp {
             if !dropped.is_empty()
                 && hover_pos.map_or(false, |p| font_row.response.rect.contains(p))
             {
-                if let Some(path) = dropped[0].path.as_ref().and_then(|p| p.to_str()) {
+                if let Some(path) = dropped[0].path().to_str() {
                     self.config.font_path = path.to_string();
                 }
             }
@@ -848,7 +868,7 @@ impl CaptureApp {
                     self.config.status_color[1],
                     self.config.status_color[2],
                 );
-                ui.colored_label(color, "⏳ Sample status message");
+                ui.colored_label(color, "... Sample status message");
             });
 
             // Quick presets
@@ -1083,14 +1103,14 @@ impl CaptureApp {
                     self.config.status_color[1],
                     self.config.status_color[2],
                 );
-                ui.colored_label(color, format!("⏳ {}", msg));
+                ui.colored_label(color, format!("... {}", msg));
                 ctx.request_repaint();
             }
             CaptureStatus::Completed(msg) => {
-                ui.colored_label(egui::Color32::GREEN, format!("✓ {}", msg));
+                ui.colored_label(egui::Color32::GREEN, format!("[OK] {}", msg));
             }
             CaptureStatus::Error(msg) => {
-                ui.colored_label(egui::Color32::RED, format!("✗ {}", msg));
+                ui.colored_label(egui::Color32::RED, format!("[ERROR] {}", msg));
             }
         }
 
@@ -1160,7 +1180,7 @@ impl CaptureApp {
             if !dropped.is_empty()
                 && hover_pos.map_or(false, |p| fix_input_row.response.rect.contains(p))
             {
-                if let Some(path) = dropped[0].path.as_ref().and_then(|p| p.to_str()) {
+                if let Some(path) = dropped[0].path().to_str() {
                     self.config.fix_input_path = path.to_string();
                 }
             }
@@ -1213,9 +1233,9 @@ impl CaptureApp {
         ui.add_space(10.0);
 
         let btn_label = if self.config.fix_folder_mode {
-            "🔧 Fix All Images"
+            "Fix All Images"
         } else {
-            "🔧 Fix Image"
+            "Fix Image"
         };
         if ui
             .add_enabled(!is_running, egui::Button::new(btn_label))
@@ -1419,7 +1439,7 @@ impl CaptureApp {
             if !dropped.is_empty()
                 && hover_pos.map_or(false, |p| trim_input_row.response.rect.contains(p))
             {
-                if let Some(path) = dropped[0].path.as_ref().and_then(|p| p.to_str()) {
+                if let Some(path) = dropped[0].path().to_str() {
                     self.trim_input_path = path.to_string();
                     self.trim_preview_texture = None;
                     self.trim_status = String::new();
@@ -1702,12 +1722,12 @@ impl CaptureApp {
 
             match self.trim_mode {
                 TrimMode::BottomTrim => {
-                    if ui.button("✂ Apply Bottom Trim").clicked() {
+                    if ui.button("Apply Bottom Trim").clicked() {
                         self.apply_trim();
                     }
                 }
                 TrimMode::MiddleCut => {
-                    if ui.button("✂ Apply Middle Cut").clicked() {
+                    if ui.button("Apply Middle Cut").clicked() {
                         self.apply_middle_cut();
                     }
                 }
@@ -1736,13 +1756,13 @@ impl CaptureApp {
                     self.config.status_color[1],
                     self.config.status_color[2],
                 );
-                ui.colored_label(color, format!("⏳ {}", msg));
+                ui.colored_label(color, format!("... {}", msg));
             }
             CaptureStatus::Completed(msg) => {
-                ui.colored_label(egui::Color32::GREEN, format!("✓ {}", msg));
+                ui.colored_label(egui::Color32::GREEN, format!("[OK] {}", msg));
             }
             CaptureStatus::Error(msg) => {
-                ui.colored_label(egui::Color32::RED, format!("✗ {}", msg));
+                ui.colored_label(egui::Color32::RED, format!("[ERROR] {}", msg));
             }
         }
 
@@ -1771,7 +1791,7 @@ impl CaptureApp {
         ui.add_space(10.0);
 
         if ui
-            .add_enabled(!is_running, egui::Button::new("🔢 Pad Filenames"))
+            .add_enabled(!is_running, egui::Button::new("Pad Filenames"))
             .clicked()
         {
             self.start_pad_filenames();
@@ -1890,4 +1910,40 @@ pub fn run_gui() -> Result<(), eframe::Error> {
         options,
         Box::new(|cc| Ok(Box::new(CaptureApp::new(cc)))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::epaint::text::{Fonts, TextOptions};
+
+    fn bundled_fonts() -> Fonts {
+        Fonts::new(TextOptions::default(), CaptureApp::base_font_definitions())
+    }
+
+    /// The bundled NanumGothic must cover Hangul, otherwise the GUI draws tofu
+    /// on machines without a Korean system font.
+    #[test]
+    fn bundled_fonts_cover_hangul() {
+        let mut fonts = bundled_fonts();
+        let font_id = egui::FontId::proportional(14.0);
+        assert!(fonts.has_glyphs(&font_id, "한글 캡처 설정"));
+    }
+
+    /// Every non-ASCII character used in GUI strings must resolve to a glyph in
+    /// the font stack. Note that the default fonts cover far fewer symbols than
+    /// their cmaps suggest (most emoji resolve to tofu), so if this fails, pick a
+    /// covered character instead of assuming a fallback font will supply it.
+    #[test]
+    fn bundled_fonts_cover_gui_symbols() {
+        let mut fonts = bundled_fonts();
+        let font_id = egui::FontId::proportional(14.0);
+        for symbol in "×→—".chars() {
+            assert!(
+                fonts.has_glyphs(&font_id, &symbol.to_string()),
+                "no glyph for {symbol:?} (U+{:04X})",
+                symbol as u32
+            );
+        }
+    }
 }

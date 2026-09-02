@@ -11,7 +11,7 @@ A powerful screen capture tool that automatically scrolls and stitches screensho
 - 🎯 **Preset Support**: Save and reuse crop configurations
 - 🎨 **GUI & CLI**: Use graphical interface or command line
 - ⏹️ **Stop Anytime**: Cancel capture in progress from GUI
-- 🌏 **Unicode Support**: Optional font loading for Korean, Japanese, Chinese characters
+- 🌏 **Unicode Support**: Korean font bundled into the binary, no setup required
 
 ## Installation
 
@@ -46,7 +46,7 @@ cargo run --bin capture-gui
 - Crop preset selector with dropdown
 - Equivalent CLI command generator
 - Copy settings to clipboard
-- Optional Unicode font support
+- Bundled Unicode font (Korean works out of the box)
 
 ### CLI Mode
 
@@ -108,16 +108,34 @@ Use a preset:
 
 ## Unicode Font Support
 
-For proper display of Korean, Japanese, Chinese and other Unicode characters in the GUI:
+Two fonts are compiled into the binary, so Korean text and symbols render on any machine
+with no font installation:
 
-1. Download Noto Sans KR font from [Google Fonts](https://fonts.google.com/noto/specimen/Noto+Sans+KR)
-2. Place the `.ttf` file in one of these locations:
-   - `assets/NotoSansKR-Regular.ttf`
-   - `NotoSansKR-Regular.ttf` (current directory)
-   - `~/.config/capture/NotoSansKR-Regular.ttf` (Linux/macOS)
-   - `%USERPROFILE%\.config\capture\NotoSansKR-Regular.ttf` (Windows)
+- **NanumGothic** - Hangul
+- **Noto Sans Symbols** - symbols the default fonts lack
 
-The GUI will automatically load the font if found. Without it, the GUI uses default fonts (English only).
+Both are registered as fallbacks: the default fonts still handle Latin first.
+
+### Using a different font
+
+To override the primary font, either:
+
+- Load it at runtime from the **Settings** tab (Browse, or drag a `.ttf`/`.otf`/`.ttc` onto
+  the field, then click **Load Font**), or
+- Place a file named `NotoSansKR-Regular.ttf` in one of these locations, which is picked up
+  automatically at startup:
+  - `assets/NotoSansKR-Regular.ttf`
+  - `NotoSansKR-Regular.ttf` (current directory)
+  - `~/.config/capture/NotoSansKR-Regular.ttf` (Linux/macOS)
+  - `%USERPROFILE%\.config\capture\NotoSansKR-Regular.ttf` (Windows)
+
+An override takes top priority; the bundled fonts stay behind it as fallbacks, so Korean
+keeps rendering even if the override lacks Hangul.
+
+### Font licenses
+
+NanumGothic and Noto Sans Symbols are both distributed under the
+[SIL Open Font License 1.1](https://scripts.sil.org/OFL).
 
 ## Platform Support
 
