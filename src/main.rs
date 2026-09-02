@@ -1,6 +1,6 @@
 use anyhow::Result;
-use capture::presets;
 use capture::constants::CaptureTimings;
+use capture::presets;
 use capture::{ScreenCapture, build_output_path, validate_format, validate_output_path};
 use clap::Parser;
 use log::info;
