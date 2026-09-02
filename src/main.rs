@@ -1,5 +1,6 @@
 use anyhow::Result;
 use capture::presets;
+use capture::constants::CaptureTimings;
 use capture::{ScreenCapture, build_output_path, validate_format, validate_output_path};
 use clap::Parser;
 use log::info;
@@ -25,7 +26,7 @@ struct Args {
     #[arg(
         short = 'p',
         long,
-        default_value_t = 125,
+        default_value_t = capture::constants::defaults::OVERLAP,
         help = "Overlap pixels for stitching"
     )]
     overlap: u32,
@@ -82,10 +83,31 @@ struct Args {
 
     #[arg(
         long,
-        default_value_t = 200,
+        default_value_t = capture::constants::timing::SCROLL_WAIT_MS,
+        help = "Delay in milliseconds after the scroll keypress, waiting for content to load"
+    )]
+    scroll_wait: u64,
+
+    #[arg(
+        long,
+        default_value_t = capture::constants::defaults::SCROLL_DELAY,
         help = "Delay in milliseconds after scrolling before capturing (screenshot mode only)"
     )]
     scroll_delay: u64,
+
+    #[arg(
+        long,
+        default_value_t = capture::constants::timing::SMALL_DELAY_MS,
+        help = "Delay in milliseconds after capturing, before the next scroll"
+    )]
+    post_capture_delay: u64,
+
+    #[arg(
+        long,
+        default_value_t = capture::constants::timing::KEYBOARD_POLL_MS,
+        help = "Milliseconds each iteration waits for a Q keypress before scrolling again"
+    )]
+    poll_delay: u64,
 
     #[arg(
         long,
@@ -230,7 +252,12 @@ fn main() -> Result<()> {
 
     let output_path = build_output_path(&args.output, &args.format);
     validate_output_path(&output_path)?;
-    let capture = ScreenCapture::new();
+    let capture = ScreenCapture::new().with_timings(CaptureTimings {
+        scroll_wait_ms: args.scroll_wait,
+        scroll_delay_ms: args.scroll_delay,
+        post_capture_ms: args.post_capture_delay,
+        poll_ms: args.poll_delay,
+    });
 
     let crop_value = if let Some(preset_name) = &args.crop_preset {
         let all_presets = presets::get_all_presets()?;
@@ -269,7 +296,6 @@ fn main() -> Result<()> {
                 &args.key,
                 false,
                 Some(format!("{},{},{},{}", x, y, w, h)),
-                args.scroll_delay,
                 args.duplicate_threshold,
                 args.trim_bottom,
                 args.best_overlap,
@@ -297,7 +323,6 @@ fn main() -> Result<()> {
         &args.key,
         args.window_only,
         crop_value,
-        args.scroll_delay,
         args.duplicate_threshold,
         args.trim_bottom,
         args.best_overlap,

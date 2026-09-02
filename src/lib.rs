@@ -3,6 +3,7 @@ pub mod gui;
 pub mod presets;
 
 use anyhow::Result;
+use constants::CaptureTimings;
 use constants::timing;
 use crossterm::event::{Event, KeyCode, KeyEvent, poll, read};
 use enigo::{Enigo, Key, Keyboard, Settings};
@@ -66,15 +67,28 @@ pub fn validate_output_path(output_path: &str) -> Result<()> {
 
 pub struct ScreenCapture {
     logs: Option<Arc<Mutex<Vec<String>>>>,
+    timings: CaptureTimings,
 }
 
 impl ScreenCapture {
     pub fn new() -> Self {
-        Self { logs: None }
+        Self {
+            logs: None,
+            timings: CaptureTimings::default(),
+        }
     }
 
     pub fn new_with_logs(logs: Arc<Mutex<Vec<String>>>) -> Self {
-        Self { logs: Some(logs) }
+        Self {
+            logs: Some(logs),
+            timings: CaptureTimings::default(),
+        }
+    }
+
+    /// Override the delays used by the scroll-and-capture loop.
+    pub fn with_timings(mut self, timings: CaptureTimings) -> Self {
+        self.timings = timings;
+        self
     }
 
     pub fn log(&self, level: log::Level, msg: &str) {
@@ -645,7 +659,7 @@ end tell
         };
 
         enigo.key(key, enigo::Direction::Click)?;
-        thread::sleep(Duration::from_millis(timing::SCROLL_WAIT_MS)); // Wait for content to load
+        thread::sleep(Duration::from_millis(self.timings.scroll_wait_ms)); // Wait for content to load
         Ok(())
     }
 
@@ -799,7 +813,6 @@ end tell
         key_type: &str,
         window_only: bool,
         crop: Option<String>,
-        scroll_delay_ms: u64,
         duplicate_threshold: usize,
         trim_bottom: u32,
         best_overlap: bool,
@@ -811,7 +824,6 @@ end tell
             key_type,
             window_only,
             crop,
-            scroll_delay_ms,
             false,
             None,
             duplicate_threshold,
@@ -829,7 +841,6 @@ end tell
         key_type: &str,
         window_only: bool,
         crop: Option<String>,
-        scroll_delay_ms: u64,
         duplicate_threshold: usize,
         trim_bottom: u32,
         best_overlap: bool,
@@ -841,7 +852,6 @@ end tell
             key_type,
             window_only,
             crop,
-            scroll_delay_ms,
             true,
             None,
             duplicate_threshold,
@@ -859,7 +869,6 @@ end tell
         key_type: &str,
         window_only: bool,
         crop: Option<String>,
-        scroll_delay_ms: u64,
         stop_flag: Arc<Mutex<bool>>,
         duplicate_threshold: usize,
         trim_bottom: u32,
@@ -873,7 +882,6 @@ end tell
             key_type,
             window_only,
             crop,
-            scroll_delay_ms,
             true,
             Some(stop_flag),
             duplicate_threshold,
@@ -891,7 +899,6 @@ end tell
         key_type: &str,
         window_only: bool,
         crop: Option<String>,
-        scroll_delay_ms: u64,
         skip_input: bool,
         stop_flag: Option<Arc<Mutex<bool>>>,
         duplicate_threshold: usize,
@@ -920,7 +927,13 @@ end tell
         );
         self.log(
             log::Level::Info,
-            &format!("Scroll delay: {}ms", scroll_delay_ms),
+            &format!(
+                "Delays: scroll wait {}ms, scroll delay {}ms, post capture {}ms, poll {}ms",
+                self.timings.scroll_wait_ms,
+                self.timings.scroll_delay_ms,
+                self.timings.post_capture_ms,
+                self.timings.poll_ms
+            ),
         );
         if let Some(max) = max_scrolls {
             self.log(log::Level::Info, &format!("Max scrolls: {}", max));
@@ -1018,7 +1031,7 @@ end tell
             }
 
             self.scroll_down(key_type)?;
-            thread::sleep(Duration::from_millis(scroll_delay_ms));
+            thread::sleep(Duration::from_millis(self.timings.scroll_delay_ms));
 
             let current_capture = self.capture_screen(crop_region)?;
             self.log(
@@ -1052,10 +1065,10 @@ end tell
             }
             scroll_count += 1;
 
-            thread::sleep(Duration::from_millis(timing::SMALL_DELAY_MS));
+            thread::sleep(Duration::from_millis(self.timings.post_capture_ms));
 
             if !skip_input {
-                if poll(Duration::from_millis(timing::KEYBOARD_POLL_MS))? {
+                if poll(Duration::from_millis(self.timings.poll_ms))? {
                     match read()? {
                         Event::Key(KeyEvent {
                             code: KeyCode::Char('q') | KeyCode::Char('Q'),
@@ -1068,7 +1081,7 @@ end tell
                     }
                 }
             } else {
-                thread::sleep(Duration::from_millis(timing::KEYBOARD_POLL_MS));
+                thread::sleep(Duration::from_millis(self.timings.poll_ms));
             }
         }
 

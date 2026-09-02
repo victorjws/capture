@@ -77,11 +77,32 @@ cargo run --bin capture-gui
 --video                  Use video recording mode (recommended)
 --duration <SECONDS>     Video recording duration [default: 10]
 --fps <FPS>              Frames to extract per second [default: 2]
---overlap <PIXELS>       Overlap for stitching [default: 125]
+--overlap <PIXELS>       Overlap for stitching [default: 125, Linux: 118]
 --delay <SECONDS>        Delay before starting [default: 3]
 --key <KEY>              Scroll key: space, down, pagedown [default: space]
 --output <FILE>          Output file path [default: scroll_capture.png]
 ```
+
+### Capture Loop Delays
+
+Each scroll-and-capture cycle runs four delays, in this order. All are in
+milliseconds and all are tunable from both the CLI and the GUI:
+
+```
+--scroll-wait <MS>          After the scroll keypress, waiting for content
+                            to load [default: 500]
+--scroll-delay <MS>         After that, immediately before the screenshot
+                            is taken [default: 200]
+--post-capture-delay <MS>   After the screenshot has been compared against
+                            the previous frame [default: 300]
+--poll-delay <MS>           Waiting for a Q keypress before scrolling again;
+                            a plain sleep in GUI mode [default: 500]
+```
+
+With the defaults a cycle costs 1500ms plus the time to take and compare the
+screenshot. `--scroll-wait` is the one to raise for pages that load slowly, and
+`--post-capture-delay` and `--poll-delay` are the ones to lower to speed up a
+capture.
 
 ### Crop Presets
 

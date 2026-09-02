@@ -17,6 +17,12 @@ pub mod gui {
     pub const DELAY_MAX: u64 = 10;
     pub const SCROLL_DELAY_MIN: u64 = 100;
     pub const SCROLL_DELAY_MAX: u64 = 1000;
+    pub const SCROLL_WAIT_MIN: u64 = 0;
+    pub const SCROLL_WAIT_MAX: u64 = 2000;
+    pub const POST_CAPTURE_MIN: u64 = 0;
+    pub const POST_CAPTURE_MAX: u64 = 2000;
+    pub const POLL_MIN: u64 = 0;
+    pub const POLL_MAX: u64 = 2000;
     pub const DUPLICATE_THRESHOLD_MIN: usize = 1;
     pub const DUPLICATE_THRESHOLD_MAX: usize = 10;
 
@@ -36,7 +42,14 @@ pub mod gui {
 // Capture configuration defaults
 pub mod defaults {
     pub const OUTPUT_PATH: &str = "00.png";
+
+    /// Linux scrolls a slightly different distance for the same keypress, so it
+    /// needs its own stitching overlap.
+    #[cfg(target_os = "linux")]
+    pub const OVERLAP: u32 = 118;
+    #[cfg(not(target_os = "linux"))]
     pub const OVERLAP: u32 = 125;
+
     pub const DELAY: u64 = 3;
     pub const SCROLL_DELAY: u64 = 200;
     pub const MAX_SCROLLS_DEFAULT: &str = "";
@@ -55,4 +68,34 @@ pub mod timing {
     pub const MOUSE_POSITION_POLL_MS: u64 = 100;
     pub const ZOOM_ENABLE_DELAY_MS: u64 = 500;
     pub const KEYBOARD_POLL_MS: u64 = 500;
+}
+
+/// Every delay in one scroll-and-capture cycle, in the order they happen.
+///
+/// One iteration is: press the scroll key, wait `scroll_wait_ms` for the content
+/// to load, wait a further `scroll_delay_ms`, take the screenshot, compare it
+/// against the previous one, wait `post_capture_ms`, then wait up to `poll_ms`
+/// for a quit keypress before scrolling again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CaptureTimings {
+    /// After the scroll keypress, waiting for the page to render new content.
+    pub scroll_wait_ms: u64,
+    /// After `scroll_wait_ms`, immediately before the screenshot is taken.
+    pub scroll_delay_ms: u64,
+    /// After the screenshot has been compared against the previous frame.
+    pub post_capture_ms: u64,
+    /// How long each iteration waits for a quit keypress. In GUI mode nothing
+    /// reads the keyboard, so this is a plain sleep.
+    pub poll_ms: u64,
+}
+
+impl Default for CaptureTimings {
+    fn default() -> Self {
+        Self {
+            scroll_wait_ms: timing::SCROLL_WAIT_MS,
+            scroll_delay_ms: defaults::SCROLL_DELAY,
+            post_capture_ms: timing::SMALL_DELAY_MS,
+            poll_ms: timing::KEYBOARD_POLL_MS,
+        }
+    }
 }
