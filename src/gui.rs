@@ -31,7 +31,6 @@ struct CaptureConfig {
 
     // Screenshot mode settings
     max_scrolls: String, // Empty string means unlimited
-    scroll_wait: u64,
     scroll_delay: u64,
     post_capture_delay: u64,
     poll_delay: u64,
@@ -77,7 +76,6 @@ impl Default for CaptureConfig {
             delay: defaults::DELAY,
             scroll_key: ScrollKey::Space,
             max_scrolls: defaults::MAX_SCROLLS_DEFAULT.to_string(),
-            scroll_wait: timing::SCROLL_WAIT_MS,
             scroll_delay: defaults::SCROLL_DELAY,
             post_capture_delay: timing::SMALL_DELAY_MS,
             poll_delay: timing::KEYBOARD_POLL_MS,
@@ -383,7 +381,6 @@ impl CaptureApp {
         logs: Arc<Mutex<Vec<String>>>,
     ) -> anyhow::Result<String> {
         let capture = crate::ScreenCapture::new_with_logs(logs).with_timings(CaptureTimings {
-            scroll_wait_ms: config.scroll_wait,
             scroll_delay_ms: config.scroll_delay,
             post_capture_ms: config.post_capture_delay,
             poll_ms: config.poll_delay,
@@ -442,12 +439,11 @@ impl CaptureApp {
         capture.log(
             log::Level::Info,
             &format!(
-                "Max scrolls: {:?}, Overlap: {}px, delays: scroll wait {}ms, scroll delay {}ms, post capture {}ms, poll {}ms",
+                "Max scrolls: {:?}, Overlap: {}px, delays: scroll delay {}ms, post capture {}ms, poll {}ms",
                 max_scrolls
                     .map(|n: usize| n.to_string())
                     .unwrap_or("unlimited".to_string()),
                 config.overlap,
-                config.scroll_wait,
                 config.scroll_delay,
                 config.post_capture_delay,
                 config.poll_delay
@@ -638,15 +634,7 @@ impl CaptureApp {
             ui.label("Delays (one scroll-and-capture cycle, in order):");
 
             ui.horizontal(|ui| {
-                ui.label("1. After scroll key, for content to load (ms):");
-                ui.add(egui::Slider::new(
-                    &mut self.config.scroll_wait,
-                    gui_const::SCROLL_WAIT_MIN..=gui_const::SCROLL_WAIT_MAX,
-                ));
-            });
-
-            ui.horizontal(|ui| {
-                ui.label("2. Before taking the screenshot (ms):");
+                ui.label("1. Scroll key to screenshot, for content to load (ms):");
                 ui.add(egui::Slider::new(
                     &mut self.config.scroll_delay,
                     gui_const::SCROLL_DELAY_MIN..=gui_const::SCROLL_DELAY_MAX,
@@ -654,7 +642,7 @@ impl CaptureApp {
             });
 
             ui.horizontal(|ui| {
-                ui.label("3. After the screenshot (ms):");
+                ui.label("2. After the screenshot (ms):");
                 ui.add(egui::Slider::new(
                     &mut self.config.post_capture_delay,
                     gui_const::POST_CAPTURE_MIN..=gui_const::POST_CAPTURE_MAX,
@@ -662,15 +650,14 @@ impl CaptureApp {
             });
 
             ui.horizontal(|ui| {
-                ui.label("4. Before the next scroll (ms):");
+                ui.label("3. Before the next scroll (ms):");
                 ui.add(egui::Slider::new(
                     &mut self.config.poll_delay,
                     gui_const::POLL_MIN..=gui_const::POLL_MAX,
                 ));
             });
 
-            let cycle = self.config.scroll_wait
-                + self.config.scroll_delay
+            let cycle = self.config.scroll_delay
                 + self.config.post_capture_delay
                 + self.config.poll_delay;
             ui.label(
@@ -1924,7 +1911,6 @@ impl CaptureApp {
         if !self.config.max_scrolls.is_empty() {
             cmd.push(format!("--max-scrolls {}", self.config.max_scrolls));
         }
-        cmd.push(format!("--scroll-wait {}", self.config.scroll_wait));
         cmd.push(format!("--scroll-delay {}", self.config.scroll_delay));
         cmd.push(format!(
             "--post-capture-delay {}",

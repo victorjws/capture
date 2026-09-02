@@ -85,14 +85,12 @@ cargo run --bin capture-gui
 
 ### Capture Loop Delays
 
-Each scroll-and-capture cycle runs four delays, in this order. All are in
+Each scroll-and-capture cycle runs three delays, in this order. All are in
 milliseconds and all are tunable from both the CLI and the GUI:
 
 ```
---scroll-wait <MS>          After the scroll keypress, waiting for content
-                            to load [default: 500]
---scroll-delay <MS>         After that, immediately before the screenshot
-                            is taken [default: 200]
+--scroll-delay <MS>         Between the scroll keypress and the screenshot,
+                            giving the page time to render [default: 700]
 --post-capture-delay <MS>   After the screenshot has been compared against
                             the previous frame [default: 300]
 --poll-delay <MS>           Waiting for a Q keypress before scrolling again;
@@ -100,9 +98,8 @@ milliseconds and all are tunable from both the CLI and the GUI:
 ```
 
 With the defaults a cycle costs 1500ms plus the time to take and compare the
-screenshot. `--scroll-wait` is the one to raise for pages that load slowly, and
-`--post-capture-delay` and `--poll-delay` are the ones to lower to speed up a
-capture.
+screenshot. Raise `--scroll-delay` for pages that load slowly; lower
+`--post-capture-delay` and `--poll-delay` to speed up a capture.
 
 ### Crop Presets
 

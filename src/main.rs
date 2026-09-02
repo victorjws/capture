@@ -83,15 +83,8 @@ struct Args {
 
     #[arg(
         long,
-        default_value_t = capture::constants::timing::SCROLL_WAIT_MS,
-        help = "Delay in milliseconds after the scroll keypress, waiting for content to load"
-    )]
-    scroll_wait: u64,
-
-    #[arg(
-        long,
         default_value_t = capture::constants::defaults::SCROLL_DELAY,
-        help = "Delay in milliseconds after scrolling before capturing (screenshot mode only)"
+        help = "Delay in milliseconds between the scroll keypress and the screenshot, for content to load"
     )]
     scroll_delay: u64,
 
@@ -253,7 +246,6 @@ fn main() -> Result<()> {
     let output_path = build_output_path(&args.output, &args.format);
     validate_output_path(&output_path)?;
     let capture = ScreenCapture::new().with_timings(CaptureTimings {
-        scroll_wait_ms: args.scroll_wait,
         scroll_delay_ms: args.scroll_delay,
         post_capture_ms: args.post_capture_delay,
         poll_ms: args.poll_delay,

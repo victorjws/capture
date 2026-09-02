@@ -659,7 +659,6 @@ end tell
         };
 
         enigo.key(key, enigo::Direction::Click)?;
-        thread::sleep(Duration::from_millis(self.timings.scroll_wait_ms)); // Wait for content to load
         Ok(())
     }
 
@@ -928,11 +927,8 @@ end tell
         self.log(
             log::Level::Info,
             &format!(
-                "Delays: scroll wait {}ms, scroll delay {}ms, post capture {}ms, poll {}ms",
-                self.timings.scroll_wait_ms,
-                self.timings.scroll_delay_ms,
-                self.timings.post_capture_ms,
-                self.timings.poll_ms
+                "Delays: scroll delay {}ms, post capture {}ms, poll {}ms",
+                self.timings.scroll_delay_ms, self.timings.post_capture_ms, self.timings.poll_ms
             ),
         );
         if let Some(max) = max_scrolls {
@@ -1031,6 +1027,7 @@ end tell
             }
 
             self.scroll_down(key_type)?;
+            // Give the page time to render the newly scrolled-in content.
             thread::sleep(Duration::from_millis(self.timings.scroll_delay_ms));
 
             let current_capture = self.capture_screen(crop_region)?;
