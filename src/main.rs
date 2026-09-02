@@ -90,17 +90,10 @@ struct Args {
 
     #[arg(
         long,
-        default_value_t = capture::constants::timing::SMALL_DELAY_MS,
-        help = "Delay in milliseconds after capturing, before the next scroll"
+        default_value_t = capture::constants::defaults::POST_CAPTURE_DELAY,
+        help = "Delay in milliseconds between the screenshot and the next scroll; also the window for a Q keypress to stop"
     )]
     post_capture_delay: u64,
-
-    #[arg(
-        long,
-        default_value_t = capture::constants::timing::KEYBOARD_POLL_MS,
-        help = "Milliseconds each iteration waits for a Q keypress before scrolling again"
-    )]
-    poll_delay: u64,
 
     #[arg(
         long,
@@ -248,7 +241,6 @@ fn main() -> Result<()> {
     let capture = ScreenCapture::new().with_timings(CaptureTimings {
         scroll_delay_ms: args.scroll_delay,
         post_capture_ms: args.post_capture_delay,
-        poll_ms: args.poll_delay,
     });
 
     let crop_value = if let Some(preset_name) = &args.crop_preset {

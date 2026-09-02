@@ -927,8 +927,8 @@ end tell
         self.log(
             log::Level::Info,
             &format!(
-                "Delays: scroll delay {}ms, post capture {}ms, poll {}ms",
-                self.timings.scroll_delay_ms, self.timings.post_capture_ms, self.timings.poll_ms
+                "Delays: scroll delay {}ms, post capture {}ms",
+                self.timings.scroll_delay_ms, self.timings.post_capture_ms
             ),
         );
         if let Some(max) = max_scrolls {
@@ -1062,10 +1062,10 @@ end tell
             }
             scroll_count += 1;
 
-            thread::sleep(Duration::from_millis(self.timings.post_capture_ms));
-
+            // Wait before the next scroll. In CLI mode the wait doubles as the
+            // window for a Q keypress, so it is a poll rather than a sleep.
             if !skip_input {
-                if poll(Duration::from_millis(self.timings.poll_ms))? {
+                if poll(Duration::from_millis(self.timings.post_capture_ms))? {
                     match read()? {
                         Event::Key(KeyEvent {
                             code: KeyCode::Char('q') | KeyCode::Char('Q'),
@@ -1078,7 +1078,7 @@ end tell
                     }
                 }
             } else {
-                thread::sleep(Duration::from_millis(self.timings.poll_ms));
+                thread::sleep(Duration::from_millis(self.timings.post_capture_ms));
             }
         }
 

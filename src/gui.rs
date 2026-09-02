@@ -1,4 +1,4 @@
-use crate::constants::{CaptureTimings, defaults, gui as gui_const, timing};
+use crate::constants::{CaptureTimings, defaults, gui as gui_const};
 use eframe::egui;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -33,7 +33,6 @@ struct CaptureConfig {
     max_scrolls: String, // Empty string means unlimited
     scroll_delay: u64,
     post_capture_delay: u64,
-    poll_delay: u64,
     duplicate_threshold: usize,
 
     // Crop settings
@@ -77,8 +76,7 @@ impl Default for CaptureConfig {
             scroll_key: ScrollKey::Space,
             max_scrolls: defaults::MAX_SCROLLS_DEFAULT.to_string(),
             scroll_delay: defaults::SCROLL_DELAY,
-            post_capture_delay: timing::SMALL_DELAY_MS,
-            poll_delay: timing::KEYBOARD_POLL_MS,
+            post_capture_delay: defaults::POST_CAPTURE_DELAY,
             duplicate_threshold: defaults::DUPLICATE_THRESHOLD,
             window_only: false,
             crop_enabled: false,
@@ -383,7 +381,6 @@ impl CaptureApp {
         let capture = crate::ScreenCapture::new_with_logs(logs).with_timings(CaptureTimings {
             scroll_delay_ms: config.scroll_delay,
             post_capture_ms: config.post_capture_delay,
-            poll_ms: config.poll_delay,
         });
 
         if config.delay > 0 {
@@ -439,14 +436,13 @@ impl CaptureApp {
         capture.log(
             log::Level::Info,
             &format!(
-                "Max scrolls: {:?}, Overlap: {}px, delays: scroll delay {}ms, post capture {}ms, poll {}ms",
+                "Max scrolls: {:?}, Overlap: {}px, delays: scroll delay {}ms, post capture {}ms",
                 max_scrolls
                     .map(|n: usize| n.to_string())
                     .unwrap_or("unlimited".to_string()),
                 config.overlap,
                 config.scroll_delay,
-                config.post_capture_delay,
-                config.poll_delay
+                config.post_capture_delay
             ),
         );
 
@@ -642,24 +638,14 @@ impl CaptureApp {
             });
 
             ui.horizontal(|ui| {
-                ui.label("2. After the screenshot (ms):");
+                ui.label("2. Screenshot to next scroll key (ms):");
                 ui.add(egui::Slider::new(
                     &mut self.config.post_capture_delay,
                     gui_const::POST_CAPTURE_MIN..=gui_const::POST_CAPTURE_MAX,
                 ));
             });
 
-            ui.horizontal(|ui| {
-                ui.label("3. Before the next scroll (ms):");
-                ui.add(egui::Slider::new(
-                    &mut self.config.poll_delay,
-                    gui_const::POLL_MIN..=gui_const::POLL_MAX,
-                ));
-            });
-
-            let cycle = self.config.scroll_delay
-                + self.config.post_capture_delay
-                + self.config.poll_delay;
+            let cycle = self.config.scroll_delay + self.config.post_capture_delay;
             ui.label(
                 egui::RichText::new(format!(
                     "Total {}ms per capture, plus screenshot and comparison time",
@@ -1916,7 +1902,6 @@ impl CaptureApp {
             "--post-capture-delay {}",
             self.config.post_capture_delay
         ));
-        cmd.push(format!("--poll-delay {}", self.config.poll_delay));
         cmd.push(format!(
             "--duplicate-threshold {}",
             self.config.duplicate_threshold
