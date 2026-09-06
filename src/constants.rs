@@ -47,8 +47,8 @@ pub mod defaults {
     pub const OVERLAP: u32 = 125;
 
     pub const DELAY: u64 = 3;
-    pub const SCROLL_DELAY: u64 = 700;
-    pub const POST_CAPTURE_DELAY: u64 = 800;
+    pub const SCROLL_DELAY: u64 = 1200;
+    pub const POST_CAPTURE_DELAY: u64 = 0;
     pub const MAX_SCROLLS_DEFAULT: &str = "";
     pub const DUPLICATE_THRESHOLD: usize = 2;
 
