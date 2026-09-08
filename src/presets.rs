@@ -37,6 +37,7 @@ pub fn get_builtin_presets() -> HashMap<String, String> {
     presets.insert("720p".to_string(), "0,0,1280,720".to_string());
     presets.insert("4k".to_string(), "0,0,3840,2160".to_string());
     presets.insert("naver-series".to_string(), "607,23,690,1007".to_string());
+    presets.insert("naver-wide".to_string(), "412,23,1080,1007".to_string());
 
     // VM window presets (common sizes)
     presets.insert("vm-small".to_string(), "100,100,1024,768".to_string());
@@ -78,5 +79,31 @@ pub fn parse_crop_region(crop_str: &str) -> Option<(i32, i32, i32, i32)> {
         Some((parts[0], parts[1], parts[2], parts[3]))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Built-in presets are never validated at startup, so a typo here would
+    /// only surface as a silently ignored crop during a capture.
+    #[test]
+    fn builtin_presets_all_parse() {
+        for (name, value) in get_builtin_presets() {
+            assert!(
+                parse_crop_region(&value).is_some(),
+                "preset {name} has an unparseable region: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn naver_wide_preset_is_valid() {
+        let presets = get_builtin_presets();
+        let value = presets
+            .get("naver-wide")
+            .expect("naver-wide preset missing");
+        assert_eq!(parse_crop_region(value), Some((412, 23, 1080, 1007)));
     }
 }
