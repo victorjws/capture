@@ -65,6 +65,74 @@ pub fn validate_output_path(output_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// WebP stores width and height as 14-bit values, so neither may exceed this.
+/// Scroll captures routinely run tens of thousands of pixels tall, so an
+/// oversized capture is split across numbered files instead of failing to encode.
+pub const WEBP_MAX_DIMENSION: u32 = 16383;
+
+/// Splits `height` into `parts` runs that differ by at most one row, so a tall
+/// capture does not end with a sliver of a final file.
+fn split_heights(height: u32, parts: u32) -> Vec<u32> {
+    let base = height / parts;
+    let remainder = height % parts;
+    (0..parts)
+        .map(|i| if i < remainder { base + 1 } else { base })
+        .collect()
+}
+
+/// Saves `img` to `output_path`, splitting it into numbered parts when the
+/// target format cannot hold the whole image. Returns every path written, in
+/// top-to-bottom order.
+///
+/// Only WebP has a size limit small enough to matter here, and its encoder in
+/// the `image` crate is lossless-only, so splitting never costs any quality.
+pub fn save_image(img: &RgbaImage, output_path: &str) -> Result<Vec<String>> {
+    let path = std::path::Path::new(output_path);
+    let is_webp = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("webp"))
+        .unwrap_or(false);
+
+    // Splitting is vertical only, so an over-wide image has no fallback.
+    if is_webp && img.width() > WEBP_MAX_DIMENSION {
+        return Err(anyhow::anyhow!(
+            "Image is {}px wide, but WebP supports at most {}px. Use a narrower crop or save as PNG.",
+            img.width(),
+            WEBP_MAX_DIMENSION
+        ));
+    }
+
+    if !is_webp || img.height() <= WEBP_MAX_DIMENSION {
+        img.save(output_path)
+            .map_err(|e| anyhow::anyhow!("Failed to save {}: {}", output_path, e))?;
+        return Ok(vec![output_path.to_string()]);
+    }
+
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Output filename cannot be empty"))?;
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("webp");
+
+    let parts = img.height().div_ceil(WEBP_MAX_DIMENSION);
+    let digits = parts.to_string().len();
+
+    let mut written = Vec::with_capacity(parts as usize);
+    let mut y = 0;
+    for (i, part_height) in split_heights(img.height(), parts).into_iter().enumerate() {
+        let name = format!("{}_{:0>width$}.{}", stem, i + 1, ext, width = digits);
+        let part_path = path.with_file_name(&name);
+        let part = image::imageops::crop_imm(img, 0, y, img.width(), part_height).to_image();
+        part.save(&part_path)
+            .map_err(|e| anyhow::anyhow!("Failed to save {}: {}", part_path.display(), e))?;
+        written.push(part_path.to_string_lossy().into_owned());
+        y += part_height;
+    }
+
+    Ok(written)
+}
+
 pub struct ScreenCapture {
     logs: Option<Arc<Mutex<Vec<String>>>>,
     timings: CaptureTimings,
@@ -112,7 +180,7 @@ impl ScreenCapture {
         overlap: u32,
         trim_bottom: u32,
         half_seam: bool,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<Vec<String>>> {
         let img = image::open(input_path)
             .map_err(|e| anyhow::anyhow!("Failed to open image: {}", e))?
             .to_rgba8();
@@ -150,29 +218,24 @@ impl ScreenCapture {
         let output_path = match output_path_override {
             Some(p) if !p.is_empty() => build_output_path(p, output_format),
             _ => {
-                let stem = std::path::Path::new(input_path)
+                let input = std::path::Path::new(input_path);
+                let stem = input
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or("fixed");
-                let dir = std::path::Path::new(input_path)
-                    .parent()
-                    .and_then(|p| p.to_str())
-                    .unwrap_or(".");
-                let orig_backup = format!(
-                    "{}/{}",
-                    dir,
-                    build_output_path(&format!("{}_orig", stem), output_format)
-                );
+                let dir = input.parent().and_then(|p| p.to_str()).unwrap_or(".");
+                // The backup is a plain rename, not a transcode, so it must keep
+                // the input's own extension even when writing a different format.
+                let input_ext = input.extension().and_then(|s| s.to_str()).unwrap_or("png");
+                let orig_backup = format!("{}/{}_orig.{}", dir, stem, input_ext);
                 std::fs::rename(input_path, &orig_backup)
                     .map_err(|e| anyhow::anyhow!("Failed to rename original: {}", e))?;
-                input_path.to_string()
+                format!("{}/{}", dir, build_output_path(stem, output_format))
             }
         };
-        result
-            .save(&output_path)
-            .map_err(|e| anyhow::anyhow!("Failed to save: {}", e))?;
-        self.log(log::Level::Info, &format!("Saved: {}", output_path));
-        Ok(Some(output_path))
+        let written = save_image(&result, &output_path)?;
+        self.log(log::Level::Info, &format!("Saved: {}", written.join(", ")));
+        Ok(Some(written))
     }
 
     pub fn fix_images_in_folder(
@@ -1204,5 +1267,143 @@ end tell
             .copy_from_slice(&img.as_raw()[src_start..src_start + tail]);
 
         Some(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scratch directory that removes itself when the test ends, so a failing
+    /// assertion cannot leave multi-megabyte images behind.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("capture-test-{}", name));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self, file: &str) -> String {
+            self.0.join(file).to_string_lossy().into_owned()
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Fills the image with a cheap deterministic pattern. Flat colors compress
+    /// to almost nothing, which would let a broken split still round-trip.
+    fn noisy_image(width: u32, height: u32) -> RgbaImage {
+        let mut state: u32 = 0x1234_5678;
+        RgbaImage::from_fn(width, height, |_, _| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let b = state.to_le_bytes();
+            image::Rgba([b[0], b[1], b[2], 255])
+        })
+    }
+
+    fn height_of(path: &str) -> u32 {
+        image::open(path).unwrap().height()
+    }
+
+    #[test]
+    fn save_image_keeps_tall_png_as_one_file() {
+        let dir = TempDir::new("tall-png");
+        let path = dir.path("out.png");
+        let img = noisy_image(8, WEBP_MAX_DIMENSION + 5000);
+
+        let written = save_image(&img, &path).unwrap();
+
+        assert_eq!(written, vec![path.clone()]);
+        assert_eq!(height_of(&path), img.height());
+    }
+
+    #[test]
+    fn save_image_writes_short_webp_as_one_file() {
+        let dir = TempDir::new("short-webp");
+        let path = dir.path("out.webp");
+        let img = noisy_image(8, WEBP_MAX_DIMENSION);
+
+        let written = save_image(&img, &path).unwrap();
+
+        assert_eq!(written, vec![path.clone()]);
+        assert_eq!(height_of(&path), WEBP_MAX_DIMENSION);
+    }
+
+    #[test]
+    fn save_image_splits_tall_webp() {
+        let dir = TempDir::new("split-webp");
+        let path = dir.path("out.webp");
+        let img = noisy_image(8, 40_000);
+
+        let written = save_image(&img, &path).unwrap();
+
+        assert_eq!(written.len(), 3);
+        assert_eq!(written[0], dir.path("out_1.webp"));
+        assert_eq!(written[2], dir.path("out_3.webp"));
+
+        let heights: Vec<u32> = written.iter().map(|p| height_of(p)).collect();
+        assert_eq!(heights.iter().sum::<u32>(), img.height());
+        assert!(heights.iter().all(|h| *h <= WEBP_MAX_DIMENSION));
+        let (min, max) = (heights.iter().min().unwrap(), heights.iter().max().unwrap());
+        assert!(max - min <= 1, "parts should be even, got {heights:?}");
+    }
+
+    /// Ten or more parts must stay zero-padded, otherwise `_10` sorts before
+    /// `_2` everywhere the parts are listed or re-stitched.
+    #[test]
+    fn save_image_zero_pads_part_numbers() {
+        let dir = TempDir::new("pad-webp");
+        let path = dir.path("out.webp");
+        let img = noisy_image(4, WEBP_MAX_DIMENSION * 9 + 1);
+
+        let written = save_image(&img, &path).unwrap();
+
+        assert_eq!(written.len(), 10);
+        assert_eq!(written[0], dir.path("out_01.webp"));
+        assert_eq!(written[9], dir.path("out_10.webp"));
+    }
+
+    /// The whole point of WebP here is that it is lossless, so every split part
+    /// must decode back to the exact source rows.
+    #[test]
+    fn webp_split_roundtrip_is_lossless() {
+        let dir = TempDir::new("lossless-webp");
+        let path = dir.path("out.webp");
+        let img = noisy_image(16, 20_000);
+
+        let written = save_image(&img, &path).unwrap();
+        assert_eq!(written.len(), 2);
+
+        let mut y = 0;
+        for part_path in &written {
+            let part = image::open(part_path).unwrap().to_rgba8();
+            let expected =
+                image::imageops::crop_imm(&img, 0, y, img.width(), part.height()).to_image();
+            assert_eq!(
+                part.as_raw(),
+                expected.as_raw(),
+                "part {part_path} differs from source rows at y={y}"
+            );
+            y += part.height();
+        }
+        assert_eq!(y, img.height());
+    }
+
+    #[test]
+    fn save_image_rejects_too_wide_webp() {
+        let dir = TempDir::new("wide-webp");
+        let path = dir.path("out.webp");
+        let img = noisy_image(WEBP_MAX_DIMENSION + 1, 4);
+
+        let err = save_image(&img, &path).unwrap_err().to_string();
+
+        assert!(err.contains("wide"), "unexpected error: {err}");
     }
 }

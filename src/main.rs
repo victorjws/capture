@@ -1,7 +1,9 @@
 use anyhow::Result;
 use capture::constants::CaptureTimings;
 use capture::presets;
-use capture::{ScreenCapture, build_output_path, validate_format, validate_output_path};
+use capture::{
+    ScreenCapture, build_output_path, save_image, validate_format, validate_output_path,
+};
 use clap::Parser;
 use log::info;
 
@@ -18,7 +20,7 @@ struct Args {
     #[arg(
         short,
         long,
-        default_value = "png",
+        default_value = "webp",
         help = "Output format: png, jpg, jpeg, gif, bmp, tiff, tif, webp"
     )]
     format: String,
@@ -180,6 +182,23 @@ fn save_preset_from_string(preset_str: &str) -> Result<()> {
     Ok(())
 }
 
+/// Saves the capture and reports every file written, since a tall WebP capture
+/// is split across several numbered files.
+fn save_and_report(image: &image::RgbaImage, output_path: &str) -> Result<()> {
+    let written = save_image(image, output_path)?;
+    if written.len() > 1 {
+        info!(
+            "Image is {}px tall, past the WebP limit — split into {} parts",
+            image.height(),
+            written.len()
+        );
+    }
+    for path in &written {
+        info!("Saved to {}", path);
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format(|buf, record| {
@@ -220,7 +239,7 @@ fn main() -> Result<()> {
             args.trim_bottom,
             args.half_seam,
         )? {
-            Some(path) => info!("Saved to {}", path),
+            Some(paths) => info!("Saved to {}", paths.join(", ")),
             None => info!("No overlap detected — image looks correct."),
         }
         return Ok(());
@@ -284,8 +303,7 @@ fn main() -> Result<()> {
                 args.trim_bottom,
                 args.best_overlap,
             )?;
-            result_image.save(&output_path)?;
-            info!("Saved to {}", output_path);
+            save_and_report(&result_image, &output_path)?;
         }
 
         return Ok(());
@@ -312,8 +330,7 @@ fn main() -> Result<()> {
         args.best_overlap,
     )?;
 
-    result_image.save(&output_path)?;
-    info!("Saved to {}", output_path);
+    save_and_report(&result_image, &output_path)?;
 
     Ok(())
 }

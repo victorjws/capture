@@ -52,10 +52,13 @@ cargo run --bin capture-gui
 
 ```bash
 # Video mode (recommended)
-./target/release/capture --video --duration 15 --output result.png
+./target/release/capture --video --duration 15 --output result
 
 # Screenshot mode
-./target/release/capture --max-scrolls 10 --output result.png
+./target/release/capture --max-scrolls 10 --output result
+
+# Save as PNG instead of the default WebP
+./target/release/capture --max-scrolls 10 --output result --format png
 
 # Interactive region selection
 ./target/release/capture --select-region
@@ -80,8 +83,26 @@ cargo run --bin capture-gui
 --overlap <PIXELS>       Overlap for stitching [default: 125, Linux: 118]
 --delay <SECONDS>        Delay before starting [default: 3]
 --key <KEY>              Scroll key: space, down, pagedown [default: space]
---output <FILE>          Output file path [default: scroll_capture.png]
+--output <NAME>          Output filename without extension [default: 00]
+--format <FORMAT>        png, jpg, jpeg, gif, bmp, tiff, tif, webp [default: webp]
 ```
+
+### Output Format
+
+The default is **WebP**, which is written losslessly — the encoder has no lossy
+mode, so the pixels are identical to PNG at a smaller file size.
+
+WebP stores dimensions in 14 bits, so no side may exceed **16383px**. Scroll
+captures regularly run far taller than that, so an oversized capture is split
+into evenly sized, numbered parts instead of failing:
+
+```
+00_1.webp  00_2.webp  00_3.webp  ...
+```
+
+Part numbers are zero-padded when there are ten or more, so they stay in order.
+An image wider than 16383px cannot be split vertically and is rejected — use a
+narrower crop or `--format png`. PNG has no such limit and is never split.
 
 ### Capture Loop Delays
 
@@ -125,6 +146,8 @@ Use a preset:
 - `1080p` - 1920x1080 full HD
 - `720p` - 1280x720 HD
 - `4k` - 3840x2160 ultra HD
+- `naver-series` - 690x1007 Naver Series reader pane
+- `naver-wide` - 1080x1007 wide Naver reader pane (same rows, wider column)
 - `vm-small`, `vm-medium`, `vm-large` - Common VM window sizes
 
 ## Unicode Font Support
@@ -221,7 +244,7 @@ Wayland screen capture.
 ### Automated capture with specific settings
 ```bash
 ./target/release/capture --video --duration 20 --fps 3 \
-  --crop-preset 1080p --output webpage.png
+  --crop-preset 1080p --output webpage
 ```
 
 ### Capture focused window

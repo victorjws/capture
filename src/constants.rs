@@ -37,7 +37,7 @@ pub mod gui {
 
 // Capture configuration defaults
 pub mod defaults {
-    pub const OUTPUT_PATH: &str = "00.png";
+    pub const OUTPUT_PATH: &str = "00.webp";
 
     /// Linux scrolls a slightly different distance for the same keypress, so it
     /// needs its own stitching overlap.

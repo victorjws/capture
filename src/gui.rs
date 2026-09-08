@@ -70,7 +70,7 @@ impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
             output_filename: "00".to_string(), // Just the filename without extension
-            output_format: "png".to_string(),  // Default format
+            output_format: "webp".to_string(), // Default format
             overlap: defaults::OVERLAP,
             delay: defaults::DELAY,
             scroll_key: ScrollKey::Space,
@@ -356,9 +356,11 @@ impl CaptureApp {
             *is_running.lock().unwrap() = false;
 
             match result {
-                Ok(output_path) => {
-                    *status.lock().unwrap() =
-                        CaptureStatus::Completed(format!("Successfully saved to: {}", output_path));
+                Ok(output_paths) => {
+                    *status.lock().unwrap() = CaptureStatus::Completed(format!(
+                        "Successfully saved to: {}",
+                        output_paths.join(", ")
+                    ));
                 }
                 Err(e) => {
                     *status.lock().unwrap() =
@@ -377,7 +379,7 @@ impl CaptureApp {
         status: Arc<Mutex<CaptureStatus>>,
         should_stop: Arc<Mutex<bool>>,
         logs: Arc<Mutex<Vec<String>>>,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<Vec<String>> {
         let capture = crate::ScreenCapture::new_with_logs(logs).with_timings(CaptureTimings {
             scroll_delay_ms: config.scroll_delay,
             post_capture_ms: config.post_capture_delay,
@@ -464,8 +466,7 @@ impl CaptureApp {
         *status.lock().unwrap() = CaptureStatus::Running("Saving image...".to_string());
 
         let output_path = crate::build_output_path(&config.output_filename, &config.output_format);
-        result_image.save(&output_path)?;
-        Ok(output_path)
+        crate::save_image(&result_image, &output_path)
     }
 }
 
@@ -1057,8 +1058,9 @@ impl CaptureApp {
             trim_bottom,
             half_seam,
         ) {
-            Ok(Some(path)) => {
-                *status.lock().unwrap() = CaptureStatus::Completed(format!("Saved to: {}", path));
+            Ok(Some(paths)) => {
+                *status.lock().unwrap() =
+                    CaptureStatus::Completed(format!("Saved to: {}", paths.join(", ")));
             }
             Ok(None) => {
                 *status.lock().unwrap() = CaptureStatus::Completed(
@@ -1357,8 +1359,8 @@ impl CaptureApp {
         } else {
             self.trim_output_path.clone()
         };
-        match cropped.save(&out) {
-            Ok(_) => self.trim_status = format!("Saved {}×{} → {}", w, cut, out),
+        match crate::save_image(&cropped, &out) {
+            Ok(paths) => self.trim_status = format!("Saved {}×{} → {}", w, cut, paths.join(", ")),
             Err(e) => self.trim_status = format!("Error saving: {}", e),
         }
     }
@@ -1398,8 +1400,8 @@ impl CaptureApp {
         } else {
             self.trim_output_path.clone()
         };
-        match result.save(&out) {
-            Ok(_) => {
+        match crate::save_image(&result, &out) {
+            Ok(paths) => {
                 self.trim_status = format!(
                     "Saved {}×{} (removed {}px from Y={}..{}) → {}",
                     w,
@@ -1407,7 +1409,7 @@ impl CaptureApp {
                     bot_cut - top_cut,
                     top_cut,
                     bot_cut,
-                    out
+                    paths.join(", ")
                 )
             }
             Err(e) => self.trim_status = format!("Error saving: {}", e),
