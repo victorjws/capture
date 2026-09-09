@@ -64,6 +64,11 @@ struct CaptureConfig {
 
     // Rename tab settings
     rename_folder_path: String,
+
+    // Convert tab settings
+    convert_input_path: String,
+    convert_folder_mode: bool,
+    convert_delete_original: bool,
 }
 
 impl Default for CaptureConfig {
@@ -96,6 +101,9 @@ impl Default for CaptureConfig {
             half_seam: false,
             best_overlap: false,
             rename_folder_path: String::new(),
+            convert_input_path: String::new(),
+            convert_folder_mode: false,
+            convert_delete_original: false,
         }
     }
 }
@@ -127,6 +135,7 @@ enum Tab {
     Fix,
     Trim,
     Rename,
+    Convert,
     Settings,
 }
 
@@ -478,6 +487,7 @@ impl eframe::App for CaptureApp {
             ui.selectable_value(&mut self.current_tab, Tab::Fix, "Fix");
             ui.selectable_value(&mut self.current_tab, Tab::Trim, "Trim");
             ui.selectable_value(&mut self.current_tab, Tab::Rename, "Rename");
+            ui.selectable_value(&mut self.current_tab, Tab::Convert, "Convert");
             ui.selectable_value(&mut self.current_tab, Tab::Settings, "Settings");
         });
 
@@ -489,6 +499,7 @@ impl eframe::App for CaptureApp {
             Tab::Fix => self.render_fix_tab(ui, &ctx),
             Tab::Trim => self.render_trim_tab(ui, &ctx),
             Tab::Rename => self.render_rename_tab(ui, &ctx),
+            Tab::Convert => self.render_convert_tab(ui, &ctx),
             Tab::Settings => self.render_settings_tab(ui, &ctx),
         });
     }
@@ -1881,6 +1892,255 @@ impl CaptureApp {
                     *status.lock().unwrap() = CaptureStatus::Error(format!("{}", e));
                 }
             }
+            *is_running.lock().unwrap() = false;
+        });
+    }
+
+    fn render_convert_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.heading("Convert Format");
+        ui.add_space(10.0);
+
+        ui.label("Re-encodes existing captures into the chosen format, next to the originals.");
+        ui.label(
+            egui::RichText::new(
+                "WebP is lossless here; captures taller than 16383px are split into numbered parts.",
+            )
+            .weak(),
+        );
+        ui.add_space(10.0);
+
+        let current_status = self.status.lock().unwrap().clone();
+        match &current_status {
+            CaptureStatus::Idle => {}
+            CaptureStatus::Running(msg) => {
+                let color = egui::Color32::from_rgb(
+                    self.config.status_color[0],
+                    self.config.status_color[1],
+                    self.config.status_color[2],
+                );
+                ui.colored_label(color, format!("... {}", msg));
+                ctx.request_repaint();
+            }
+            CaptureStatus::Completed(msg) => {
+                ui.colored_label(egui::Color32::GREEN, format!("[OK] {}", msg));
+            }
+            CaptureStatus::Error(msg) => {
+                ui.colored_label(egui::Color32::RED, format!("[ERROR] {}", msg));
+            }
+        }
+
+        ui.add_space(10.0);
+
+        let is_running = *self.is_running.lock().unwrap();
+
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label("Mode:");
+                ui.radio_value(&mut self.config.convert_folder_mode, false, "Single file");
+                ui.radio_value(
+                    &mut self.config.convert_folder_mode,
+                    true,
+                    "Folder (all images)",
+                );
+            });
+
+            ui.separator();
+
+            let convert_input_row = ui.horizontal(|ui| {
+                ui.label(if self.config.convert_folder_mode {
+                    "Folder:"
+                } else {
+                    "Input image:"
+                });
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.config.convert_input_path)
+                        .hint_text(if self.config.convert_folder_mode {
+                            "Path to folder containing images"
+                        } else {
+                            "Path to an image (e.g. an old PNG capture)"
+                        })
+                        .desired_width(ui.available_width() - 90.0),
+                );
+                if ui.button("Browse...").clicked() {
+                    if self.config.convert_folder_mode {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            if let Some(s) = path.to_str() {
+                                self.config.convert_input_path = s.to_string();
+                            }
+                        }
+                    } else if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "tiff"])
+                        .pick_file()
+                    {
+                        if let Some(s) = path.to_str() {
+                            self.config.convert_input_path = s.to_string();
+                        }
+                    }
+                }
+            });
+            let hover_pos = ctx.input(|i| i.pointer.hover_pos());
+            if !ctx.input(|i| i.raw.hovered_files.is_empty())
+                && hover_pos.map_or(false, |p| convert_input_row.response.rect.contains(p))
+            {
+                ui.painter().rect_stroke(
+                    convert_input_row.response.rect,
+                    4.0,
+                    egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+                    egui::StrokeKind::Outside,
+                );
+            }
+            let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+            if !dropped.is_empty()
+                && hover_pos.map_or(false, |p| convert_input_row.response.rect.contains(p))
+            {
+                if let Some(path) = dropped[0].path().to_str() {
+                    self.config.convert_input_path = path.to_string();
+                }
+            }
+
+            ui.add_space(5.0);
+
+            ui.horizontal(|ui| {
+                ui.label("Target format:");
+                egui::ComboBox::from_id_salt("convert_format_selector")
+                    .selected_text(&self.config.output_format)
+                    .width(100.0)
+                    .show_ui(ui, |ui| {
+                        for format in crate::SUPPORTED_FORMATS {
+                            ui.selectable_value(
+                                &mut self.config.output_format,
+                                format.to_string(),
+                                *format,
+                            );
+                        }
+                    });
+                ui.label(egui::RichText::new("shared with the Capture tab").weak());
+            });
+
+            ui.horizontal(|ui| {
+                ui.checkbox(
+                    &mut self.config.convert_delete_original,
+                    "Delete original after convert",
+                );
+                ui.label(egui::RichText::new("off: originals are kept").weak());
+            });
+
+            ui.label(
+                egui::RichText::new(
+                    "Files already in the target format are skipped, and an existing file with the same name is never overwritten.",
+                )
+                .weak(),
+            );
+        });
+
+        ui.add_space(10.0);
+
+        let btn_label = if self.config.convert_folder_mode {
+            "Convert All Images"
+        } else {
+            "Convert Image"
+        };
+        if ui
+            .add_enabled(!is_running, egui::Button::new(btn_label))
+            .clicked()
+        {
+            self.start_convert();
+        }
+
+        ui.add_space(20.0);
+
+        ui.group(|ui| {
+            ui.label("Log");
+            ui.add_space(5.0);
+            let logs = self.logs.lock().unwrap();
+            egui::ScrollArea::vertical()
+                .max_height(200.0)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    if logs.is_empty() {
+                        ui.label("No logs yet...");
+                    } else {
+                        for log in logs.iter() {
+                            ui.label(egui::RichText::new(log).font(egui::FontId::monospace(12.0)));
+                        }
+                    }
+                });
+        });
+    }
+
+    fn start_convert(&mut self) {
+        if self.config.convert_input_path.is_empty() {
+            *self.status.lock().unwrap() =
+                CaptureStatus::Error("No input path specified.".to_string());
+            return;
+        }
+        if let Err(e) = crate::validate_format(&self.config.output_format) {
+            *self.status.lock().unwrap() = CaptureStatus::Error(format!("{}", e));
+            return;
+        }
+
+        let input_path = self.config.convert_input_path.clone();
+        let format = self.config.output_format.clone();
+        let delete_original = self.config.convert_delete_original;
+        let folder_mode = self.config.convert_folder_mode;
+
+        let status = Arc::clone(&self.status);
+        let is_running = Arc::clone(&self.is_running);
+        let logs = Arc::clone(&self.logs);
+
+        *is_running.lock().unwrap() = true;
+        *status.lock().unwrap() = CaptureStatus::Running("Starting...".to_string());
+        logs.lock().unwrap().clear();
+
+        thread::spawn(move || {
+            let capture = crate::ScreenCapture::new_with_logs(logs);
+
+            if folder_mode {
+                let result = capture.convert_images_in_folder(
+                    &input_path,
+                    &format,
+                    delete_original,
+                    |cur, total, name| {
+                        *status.lock().unwrap() =
+                            CaptureStatus::Running(format!("[{}/{}] {}", cur, total, name));
+                    },
+                );
+                match result {
+                    Ok((converted, skipped)) if converted + skipped == 0 => {
+                        *status.lock().unwrap() =
+                            CaptureStatus::Completed("No images found in folder.".to_string());
+                    }
+                    Ok((converted, skipped)) => {
+                        *status.lock().unwrap() = CaptureStatus::Completed(format!(
+                            "Done: {} converted, {} skipped (total {})",
+                            converted,
+                            skipped,
+                            converted + skipped
+                        ));
+                    }
+                    Err(e) => {
+                        *status.lock().unwrap() = CaptureStatus::Error(format!("{}", e));
+                    }
+                }
+            } else {
+                match capture.convert_image(&input_path, &format, delete_original) {
+                    Ok(Some(paths)) => {
+                        *status.lock().unwrap() =
+                            CaptureStatus::Completed(format!("Saved to: {}", paths.join(", ")));
+                    }
+                    Ok(None) => {
+                        *status.lock().unwrap() = CaptureStatus::Completed(format!(
+                            "Already {} — nothing to convert.",
+                            format
+                        ));
+                    }
+                    Err(e) => {
+                        *status.lock().unwrap() = CaptureStatus::Error(format!("{}", e));
+                    }
+                }
+            }
+
             *is_running.lock().unwrap() = false;
         });
     }

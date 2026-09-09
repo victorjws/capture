@@ -109,6 +109,18 @@ struct Args {
 
     #[arg(
         long,
+        help = "Convert an existing image file, or every image in a folder, to --format (default: webp)"
+    )]
+    convert: Option<String>,
+
+    #[arg(
+        long,
+        help = "Delete the source file after a successful --convert (originals are kept by default)"
+    )]
+    delete_original: bool,
+
+    #[arg(
+        long,
         help = "Height of each captured frame in pixels, required when using --fix"
     )]
     screen_height: Option<u32>,
@@ -241,6 +253,36 @@ fn main() -> Result<()> {
         )? {
             Some(paths) => info!("Saved to {}", paths.join(", ")),
             None => info!("No overlap detected — image looks correct."),
+        }
+        return Ok(());
+    }
+
+    if let Some(convert_path) = &args.convert {
+        validate_format(&args.format)?;
+        let capture = ScreenCapture::new();
+
+        if std::path::Path::new(convert_path).is_dir() {
+            // The folder pass logs each file itself, so the progress callback
+            // would only duplicate it here.
+            let (converted, skipped) = capture.convert_images_in_folder(
+                convert_path,
+                &args.format,
+                args.delete_original,
+                |_, _, _| {},
+            )?;
+            if converted + skipped == 0 {
+                info!("No images found in {}", convert_path);
+            } else {
+                info!("Done: {} converted, {} skipped", converted, skipped);
+            }
+        } else {
+            // convert_image already logs every path it writes.
+            if capture
+                .convert_image(convert_path, &args.format, args.delete_original)?
+                .is_none()
+            {
+                info!("Already {} — nothing to convert.", args.format);
+            }
         }
         return Ok(());
     }

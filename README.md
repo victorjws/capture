@@ -44,6 +44,7 @@ cargo run --bin capture-gui
 - Real-time status updates during capture
 - **Stop capture anytime** with Stop button
 - Crop preset selector with dropdown
+- **Convert tab**: re-encode existing captures (e.g. old PNGs) to WebP
 - Equivalent CLI command generator
 - Copy settings to clipboard
 - Bundled Unicode font (Korean works out of the box)
@@ -85,6 +86,8 @@ cargo run --bin capture-gui
 --key <KEY>              Scroll key: space, down, pagedown [default: space]
 --output <NAME>          Output filename without extension [default: 00]
 --format <FORMAT>        png, jpg, jpeg, gif, bmp, tiff, tif, webp [default: webp]
+--convert <PATH>         Convert an existing image or folder to --format
+--delete-original        Delete the source after a successful --convert
 ```
 
 ### Output Format
@@ -103,6 +106,26 @@ into evenly sized, numbered parts instead of failing:
 Part numbers are zero-padded when there are ten or more, so they stay in order.
 An image wider than 16383px cannot be split vertically and is rejected — use a
 narrower crop or `--format png`. PNG has no such limit and is never split.
+
+### Converting Existing Captures
+
+Captures taken before WebP became the default can be re-encoded with the exact
+same rules — lossless, and split at the same 16383px limit:
+
+```bash
+# One file, original kept
+./target/release/capture --convert old.png
+
+# Every image in a folder (subfolders untouched), originals deleted after
+./target/release/capture --convert ./captures --delete-original
+```
+
+The new file is written next to the original under the same name, using
+`--format` (WebP by default). Files already in the target format are skipped,
+`<name>_orig.*` backups from `--fix` are left alone, and an existing file with
+the target name is never overwritten. The original is only deleted with
+`--delete-original`, and only once the new file is on disk. The GUI offers the
+same thing in the **Convert** tab.
 
 ### Capture Loop Delays
 

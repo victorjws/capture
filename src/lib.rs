@@ -133,6 +133,41 @@ pub fn save_image(img: &RgbaImage, output_path: &str) -> Result<Vec<String>> {
     Ok(written)
 }
 
+/// Extensions the folder-wide tools accept as input.
+const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif"];
+
+/// Lists the image files directly inside `folder_path`, sorted by name.
+/// Subfolders are left alone, so a folder-wide pass never reaches further than
+/// the folder the user picked.
+fn list_image_files(folder_path: &str) -> Result<Vec<std::path::PathBuf>> {
+    let dir =
+        std::fs::read_dir(folder_path).map_err(|e| anyhow::anyhow!("Cannot read folder: {}", e))?;
+
+    let mut files: Vec<std::path::PathBuf> = dir
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| IMAGE_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+                    .unwrap_or(false)
+        })
+        .collect();
+
+    files.sort();
+    Ok(files)
+}
+
+/// True for the `<name>_orig.<ext>` backups `fix_image` leaves behind, which a
+/// folder-wide pass must not treat as a capture of its own.
+fn is_orig_backup(path: &std::path::Path) -> bool {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.ends_with("_orig"))
+        .unwrap_or(false)
+}
+
 pub struct ScreenCapture {
     logs: Option<Arc<Mutex<Vec<String>>>>,
     timings: CaptureTimings,
@@ -248,29 +283,8 @@ impl ScreenCapture {
         half_seam: bool,
         on_progress: impl Fn(usize, usize, &str),
     ) -> Result<(usize, usize)> {
-        const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif"];
-
-        let dir = std::fs::read_dir(folder_path)
-            .map_err(|e| anyhow::anyhow!("Cannot read folder: {}", e))?;
-
-        let mut files: Vec<std::path::PathBuf> = dir
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.is_file()
-                    && p.extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| IMAGE_EXTENSIONS.contains(&e.to_lowercase().as_str()))
-                        .unwrap_or(false)
-                    && !p
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.ends_with("_orig"))
-                        .unwrap_or(false)
-            })
-            .collect();
-
-        files.sort();
+        let mut files = list_image_files(folder_path)?;
+        files.retain(|p| !is_orig_backup(p));
 
         if files.is_empty() {
             return Ok((0, 0));
@@ -323,31 +337,157 @@ impl ScreenCapture {
         Ok((fixed_count, skipped_count))
     }
 
+    /// Re-encodes an existing image as `format`, writing it next to the original
+    /// under the same name. Saving goes through [`save_image`], so a capture past
+    /// the WebP height limit is split into numbered parts exactly like a fresh
+    /// capture is.
+    ///
+    /// Returns `None` when the file is already in the target format, and every
+    /// path written otherwise.
+    pub fn convert_image(
+        &self,
+        input_path: &str,
+        format: &str,
+        delete_original: bool,
+    ) -> Result<Option<Vec<String>>> {
+        let path = std::path::Path::new(input_path);
+        let target_ext = format.trim_start_matches('.').to_lowercase();
+
+        if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case(&target_ext))
+            .unwrap_or(false)
+        {
+            self.log(
+                log::Level::Info,
+                &format!("Already {}: {} — skipped", target_ext, input_path),
+            );
+            return Ok(None);
+        }
+
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow::anyhow!("Input filename cannot be empty"))?;
+        let output_path = path
+            .with_file_name(build_output_path(stem, &target_ext))
+            .to_string_lossy()
+            .into_owned();
+
+        // Captures are expensive to redo, so a conversion never writes over a
+        // file that is already sitting there.
+        if std::path::Path::new(&output_path).exists() {
+            return Err(anyhow::anyhow!(
+                "{} already exists — remove it or rename the source first",
+                output_path
+            ));
+        }
+
+        let img = image::open(input_path)
+            .map_err(|e| anyhow::anyhow!("Failed to open image: {}", e))?
+            .to_rgba8();
+        self.log(
+            log::Level::Info,
+            &format!("Loaded: {} ({}x{})", input_path, img.width(), img.height()),
+        );
+
+        let written = save_image(&img, &output_path)?;
+        if written.len() > 1 {
+            self.log(
+                log::Level::Info,
+                &format!(
+                    "Image is {}px tall, past the {} limit — split into {} parts",
+                    img.height(),
+                    target_ext.to_uppercase(),
+                    written.len()
+                ),
+            );
+        }
+        self.log(log::Level::Info, &format!("Saved: {}", written.join(", ")));
+
+        // Only after the new file is safely on disk.
+        if delete_original {
+            match std::fs::remove_file(input_path) {
+                Ok(()) => self.log(
+                    log::Level::Info,
+                    &format!("Deleted original: {}", input_path),
+                ),
+                Err(e) => self.log(
+                    log::Level::Warn,
+                    &format!("Converted, but failed to delete {}: {}", input_path, e),
+                ),
+            }
+        }
+
+        Ok(Some(written))
+    }
+
+    /// Converts every image directly inside `folder_path`. Returns
+    /// (converted, skipped); files already in the target format and files that
+    /// fail to convert both count as skipped, and neither stops the run.
+    pub fn convert_images_in_folder(
+        &self,
+        folder_path: &str,
+        format: &str,
+        delete_original: bool,
+        on_progress: impl Fn(usize, usize, &str),
+    ) -> Result<(usize, usize)> {
+        let mut files = list_image_files(folder_path)?;
+        files.retain(|p| !is_orig_backup(p));
+
+        if files.is_empty() {
+            return Ok((0, 0));
+        }
+
+        self.log(
+            log::Level::Info,
+            &format!("Found {} image(s) to convert", files.len()),
+        );
+
+        let mut converted_count = 0;
+        let mut skipped_count = 0;
+        let total = files.len();
+
+        for (i, path) in files.iter().enumerate() {
+            let file_name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            on_progress(i + 1, total, &file_name);
+
+            let path_str = path.to_string_lossy().into_owned();
+            self.log(
+                log::Level::Info,
+                &format!("[{}/{}] {}", i + 1, total, path_str),
+            );
+
+            match self.convert_image(&path_str, format, delete_original) {
+                Ok(Some(_)) => converted_count += 1,
+                Ok(None) => skipped_count += 1,
+                Err(e) => {
+                    self.log(log::Level::Warn, &format!("  → Error: {}", e));
+                    skipped_count += 1;
+                }
+            }
+        }
+
+        Ok((converted_count, skipped_count))
+    }
+
     pub fn pad_numeric_filenames(
         &self,
         folder_path: &str,
         on_progress: impl Fn(usize, usize, &str),
     ) -> Result<usize> {
-        const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif"];
-
-        let dir = std::fs::read_dir(folder_path)
-            .map_err(|e| anyhow::anyhow!("Cannot read folder: {}", e))?;
-
-        let mut files: Vec<std::path::PathBuf> = dir
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.is_file()
-                    && p.extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| IMAGE_EXTENSIONS.contains(&e.to_lowercase().as_str()))
-                        .unwrap_or(false)
-                    && p.file_stem()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.chars().all(|c| c.is_ascii_digit()))
-                        .unwrap_or(false)
-            })
-            .collect();
+        let mut files = list_image_files(folder_path)?;
+        files.retain(|p| {
+            p.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.chars().all(|c| c.is_ascii_digit()))
+                .unwrap_or(false)
+        });
 
         if files.is_empty() {
             self.log(log::Level::Info, "No numeric-named image files found.");
@@ -373,7 +513,6 @@ impl ScreenCapture {
             return Ok(0);
         }
 
-        files.sort();
         let total = files.len();
         let mut renamed_count = 0;
 
@@ -1394,6 +1533,124 @@ mod tests {
             y += part.height();
         }
         assert_eq!(y, img.height());
+    }
+
+    #[test]
+    fn convert_image_writes_webp_next_to_png() {
+        let dir = TempDir::new("convert-png");
+        let png = dir.path("shot.png");
+        let img = noisy_image(8, 200);
+        img.save(&png).unwrap();
+
+        let written = ScreenCapture::new()
+            .convert_image(&png, "webp", false)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(written, vec![dir.path("shot.webp")]);
+        assert!(
+            std::path::Path::new(&png).exists(),
+            "original must be kept by default"
+        );
+        let converted = image::open(&written[0]).unwrap().to_rgba8();
+        assert_eq!(
+            converted.as_raw(),
+            img.as_raw(),
+            "conversion must be lossless"
+        );
+    }
+
+    #[test]
+    fn convert_image_deletes_original_when_requested() {
+        let dir = TempDir::new("convert-delete");
+        let png = dir.path("shot.png");
+        noisy_image(8, 200).save(&png).unwrap();
+
+        let written = ScreenCapture::new()
+            .convert_image(&png, "webp", true)
+            .unwrap()
+            .unwrap();
+
+        assert!(std::path::Path::new(&written[0]).exists());
+        assert!(!std::path::Path::new(&png).exists());
+    }
+
+    /// The whole point of converting through save_image: an old PNG taller than
+    /// WebP allows must split just like a fresh capture does.
+    #[test]
+    fn convert_image_splits_tall_png() {
+        let dir = TempDir::new("convert-tall");
+        let png = dir.path("tall.png");
+        noisy_image(4, 40_000).save(&png).unwrap();
+
+        let written = ScreenCapture::new()
+            .convert_image(&png, "webp", false)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(written.len(), 3);
+        assert_eq!(written[0], dir.path("tall_1.webp"));
+        let heights: Vec<u32> = written.iter().map(|p| height_of(p)).collect();
+        assert_eq!(heights.iter().sum::<u32>(), 40_000);
+        assert!(heights.iter().all(|h| *h <= WEBP_MAX_DIMENSION));
+    }
+
+    #[test]
+    fn convert_image_skips_same_format() {
+        let dir = TempDir::new("convert-same");
+        let webp = dir.path("shot.webp");
+        noisy_image(8, 100).save(&webp).unwrap();
+        let before = std::fs::read(&webp).unwrap();
+
+        let result = ScreenCapture::new()
+            .convert_image(&webp, "webp", true)
+            .unwrap();
+
+        assert!(result.is_none());
+        assert_eq!(std::fs::read(&webp).unwrap(), before);
+    }
+
+    #[test]
+    fn convert_image_refuses_to_overwrite_existing() {
+        let dir = TempDir::new("convert-clash");
+        let png = dir.path("shot.png");
+        let webp = dir.path("shot.webp");
+        noisy_image(8, 100).save(&png).unwrap();
+        let existing = noisy_image(4, 50);
+        existing.save(&webp).unwrap();
+
+        let err = ScreenCapture::new()
+            .convert_image(&png, "webp", true)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("already exists"), "unexpected error: {err}");
+        assert_eq!(
+            image::open(&webp).unwrap().to_rgba8().as_raw(),
+            existing.as_raw(),
+            "existing file must be untouched"
+        );
+        assert!(
+            std::path::Path::new(&png).exists(),
+            "source must survive a failed conversion"
+        );
+    }
+
+    #[test]
+    fn convert_images_in_folder_reports_counts() {
+        let dir = TempDir::new("convert-folder");
+        noisy_image(8, 100).save(dir.path("a.png")).unwrap();
+        noisy_image(8, 100).save(dir.path("b.png")).unwrap();
+        noisy_image(8, 100).save(dir.path("c.webp")).unwrap();
+
+        let folder = dir.0.to_string_lossy().into_owned();
+        let (converted, skipped) = ScreenCapture::new()
+            .convert_images_in_folder(&folder, "webp", false, |_, _, _| {})
+            .unwrap();
+
+        assert_eq!((converted, skipped), (2, 1));
+        assert!(std::path::Path::new(&dir.path("a.webp")).exists());
+        assert!(std::path::Path::new(&dir.path("b.webp")).exists());
     }
 
     #[test]
