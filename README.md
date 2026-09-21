@@ -115,20 +115,20 @@ WebP is the best-supported fallback and is also always lossless here — the
 `image` crate's encoder has no lossy mode. Both are written the same way, so you
 can move captures between the two formats at any time without losing anything.
 
-Captures are split into evenly sized, numbered parts at **16383px** tall:
+A capture stays in one file. WebP is the exception: it stores dimensions in 14
+bits, so anything taller than **16383px** is split into evenly sized, numbered
+parts:
 
 ```
-00_1.jxl  00_2.jxl  00_3.jxl  ...
+00_1.webp  00_2.webp  00_3.webp  ...
 ```
 
-For WebP that is a hard format limit: it stores dimensions in 14 bits. JXL has
-no such limit, but it is cut at the same rows on purpose — a CBZ page tens of
-thousands of pixels tall is unreadable in every viewer, and matching cut points
-keep a JXL archive and a WebP copy made from it part for part identical.
+JXL allows 2^30 per side, so a chapter is one `.jxl` however tall it is, and the
+paging into readable pages happens in the WebP copy made from it.
 
 Part numbers are zero-padded when there are ten or more, so they stay in order.
 A WebP wider than 16383px cannot be split vertically and is rejected — use a
-narrower crop or `--format jxl`. PNG and JXL are never split by width.
+narrower crop or `--format jxl`. PNG and JXL are never split at all.
 
 If a JXL encode fails mid-capture, the image is saved as lossless WebP instead
 with a warning, rather than losing a scroll that took minutes. Conversions do
@@ -136,25 +136,23 @@ not fall back, since their source file is still on disk.
 
 ### Building a CBZ
 
-A CBZ is just a ZIP of page images, so the parts go straight in:
-
-```bash
-zip -0 chapter.cbz 00_*.jxl
-```
-
-Viewer support for JXL is still uneven. Mihon reads it natively, as do macOS
-Preview and other desktop viewers; Kavita does not yet. Keep the archive in JXL
-and generate a reading copy when you need one — it costs nothing, both formats
-being lossless:
+A CBZ is just a ZIP of page images. The JXL archive is one file per chapter, so
+make the WebP reading copy first and zip the pages it cuts:
 
 ```bash
 ./target/release/capture --convert ./chapter --format webp
+zip -0 chapter.cbz 00_*.webp
 ```
+
+Viewer support for JXL is still uneven. Mihon reads it natively, as do macOS
+Preview and other desktop viewers; Kavita does not yet. Keeping the archive in
+JXL and regenerating the reading copy whenever you need it costs nothing, both
+formats being lossless.
 
 ### Converting Existing Captures
 
 Captures saved before JXL became the default can be re-encoded with the exact
-same rules — lossless, and split at the same 16383px boundary:
+same rules — lossless, and paged at 16383px only where WebP needs it:
 
 ```bash
 # One file, original kept
@@ -169,11 +167,29 @@ The new file is written next to the original under the same name, using
 `<name>_orig.*` backups from `--fix` are left alone, and an existing file with
 the target name is never overwritten.
 
+#### Merging split parts
+
+A chapter cut into `ch01_1.webp` … `ch01_N.webp` comes back as one image on the
+way in. Point `--convert` at any file of the run, or at the folder holding it:
+
+```bash
+./target/release/capture --convert ch01_1.webp --format jxl   # → ch01.jxl
+```
+
+The run has to be gapless from `_1`, at least two files, all the same extension
+and all the same width — a split never changes the width, so a numbered set that
+disagrees is not one image and converts file by file instead. A run already in
+the target format is merged too, since `ch01_1.jxl` plus `ch01_2.jxl` is still
+one chapter in two files. Converting **to** WebP never merges: the split is
+there for WebP's sake. In a folder run the whole run counts as one conversion.
+
 `--delete-original` reads the new file back and compares it to the source pixel
 for pixel first; anything that does not match keeps its original and is reported
-as a failure. A folder run counts converted, skipped and failed files
-separately, so a broken page cannot hide among the ones that were already in the
-target format. The GUI offers the same thing in the **Convert** tab.
+as a failure. For a merged run every part is deleted, and only after the merged
+file has been verified against all of them. A folder run counts converted,
+skipped and failed files separately, so a broken page cannot hide among the ones
+that were already in the target format. The GUI offers the same thing in the
+**Convert** tab.
 
 ### Capture Loop Delays
 

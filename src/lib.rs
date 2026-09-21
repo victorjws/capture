@@ -253,13 +253,11 @@ pub fn validate_encoder(format: &str) -> Result<()> {
 /// The tallest part [`save_image`] will write for this output path, or `None`
 /// when the format takes the image whole.
 ///
-/// For WebP this is a hard format limit. JPEG XL has none worth caring about
-/// (it allows 2^30), but a CBZ page tens of thousands of pixels tall is
-/// unreadable in every viewer, and cutting both formats at the same rows keeps
-/// a JXL archive and the WebP reading copy made from it part for part
-/// identical. So JXL takes the same bound deliberately.
+/// For WebP this is a hard format limit. JPEG XL allows 2^30 and so keeps a
+/// chapter in one file: the archive is one image per chapter, and the WebP
+/// reading copy made from it is where the 16383px page split happens.
 fn max_part_height(path: &std::path::Path) -> Option<u32> {
-    if has_extension(path, "webp") || has_extension(path, "jxl") {
+    if has_extension(path, "webp") {
         Some(WEBP_MAX_DIMENSION)
     } else {
         None
@@ -457,6 +455,110 @@ fn is_orig_backup(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// The stem and part number of a `<stem>_<n>.<ext>` file, named the way
+/// [`save_image`] numbers the parts of one split image. `None` for every other
+/// name.
+fn part_number(path: &std::path::Path) -> Option<(String, u32)> {
+    let (stem, number) = path.file_stem()?.to_str()?.rsplit_once('_')?;
+    if stem.is_empty() || number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((stem.to_string(), number.parse().ok()?))
+}
+
+/// True when `format` holds an image of any height, so parts that only exist
+/// because of a shorter format's limit are worth stacking back together.
+fn format_takes_whole_image(format: &str) -> bool {
+    max_part_height(std::path::Path::new(&build_output_path("x", format))).is_none()
+}
+
+/// Every part of the split image `path` belongs to, top to bottom, along with
+/// the stem they share.
+///
+/// `None` unless the folder holds a gapless `<stem>_1` .. `<stem>_N` run of two
+/// or more files with the same extension, which is exactly what [`save_image`]
+/// writes. A lone `photo_7.png`, or a `photo_1.png` with no `photo_2.png`, is
+/// an ordinary file that happens to end in a number.
+fn sibling_parts(path: &std::path::Path) -> Option<(String, Vec<std::path::PathBuf>)> {
+    let (stem, _) = part_number(path)?;
+    let ext = path.extension()?.to_str()?.to_lowercase();
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => std::path::Path::new("."),
+    };
+
+    let mut parts: Vec<(u32, std::path::PathBuf)> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && has_extension(p, &ext))
+        .filter_map(|p| {
+            part_number(&p)
+                .filter(|(s, _)| *s == stem)
+                .map(|(_, n)| (n, p))
+        })
+        .collect();
+
+    parts.sort();
+    if parts.len() < 2 || parts.iter().map(|(n, _)| *n).ne(1..=parts.len() as u32) {
+        return None;
+    }
+    Some((stem, parts.into_iter().map(|(_, p)| p).collect()))
+}
+
+/// Stacks `parts` back into the one image they were cut from.
+///
+/// `Ok(None)` when their widths disagree: a split never changes the width, so
+/// those files were never one image and each belongs in its own output. The
+/// parts are appended row by row and dropped as they go, so only the merged
+/// image and the part being read are ever held at once.
+fn merge_parts(parts: &[std::path::PathBuf]) -> Result<Option<RgbaImage>> {
+    let mut width: Option<u32> = None;
+    let mut height: u32 = 0;
+    let mut rows: Vec<u8> = Vec::new();
+
+    for path in parts {
+        let part = open_image(&path.to_string_lossy())?;
+        match width {
+            None => {
+                width = Some(part.width());
+                rows.reserve(part.as_raw().len() * parts.len());
+            }
+            Some(w) if w != part.width() => return Ok(None),
+            Some(_) => {}
+        }
+        height = height
+            .checked_add(part.height())
+            .ok_or_else(|| anyhow::anyhow!("Merged image would be too tall to hold"))?;
+        rows.extend_from_slice(part.as_raw());
+    }
+
+    let width = width.ok_or_else(|| anyhow::anyhow!("No parts to merge"))?;
+    RgbaImage::from_raw(width, height, rows)
+        .map(Some)
+        .ok_or_else(|| anyhow::anyhow!("Merged parts do not add up to a {}px wide image", width))
+}
+
+/// Comma-separated paths, for a log line about a whole set of inputs at once.
+fn join_paths(paths: &[std::path::PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|p| p.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// What one pass of [`ScreenCapture::convert_group`] did.
+enum Converted {
+    /// Every path written, in top-to-bottom order.
+    Written(Vec<String>),
+    /// Already in the target format, so there was nothing to do.
+    AlreadyTarget,
+    /// The inputs turned out not to be parts of one image after all, and are
+    /// better converted one by one.
+    NotOneImage,
+}
+
 pub struct ScreenCapture {
     logs: Option<Arc<Mutex<Vec<String>>>>,
     timings: CaptureTimings,
@@ -629,6 +731,12 @@ impl ScreenCapture {
     /// the WebP height limit is split into numbered parts exactly like a fresh
     /// capture is.
     ///
+    /// When `input_path` is one part of a `<stem>_1` .. `<stem>_N` run and the
+    /// target format has no height limit, the whole run is stacked back into a
+    /// single `<stem>.<format>` instead — including a run already in the target
+    /// format, since `ch01_1.jxl` plus `ch01_2.jxl` is still one chapter in two
+    /// files.
+    ///
     /// Returns `None` when the file is already in the target format, and every
     /// path written otherwise.
     pub fn convert_image(
@@ -640,25 +748,57 @@ impl ScreenCapture {
         let path = std::path::Path::new(input_path);
         let target_ext = format.trim_start_matches('.').to_lowercase();
 
-        if path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.eq_ignore_ascii_case(&target_ext))
-            .unwrap_or(false)
-        {
-            self.log(
-                log::Level::Info,
-                &format!("Already {}: {} — skipped", target_ext, input_path),
-            );
-            return Ok(None);
+        if format_takes_whole_image(&target_ext) {
+            if let Some((stem, parts)) = sibling_parts(path) {
+                if let Converted::Written(written) =
+                    self.convert_group(&parts, Some(&stem), &target_ext, delete_original)?
+                {
+                    return Ok(Some(written));
+                }
+            }
         }
 
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| anyhow::anyhow!("Input filename cannot be empty"))?;
-        let output_path = path
-            .with_file_name(build_output_path(stem, &target_ext))
+        match self.convert_group(&[path.to_path_buf()], None, &target_ext, delete_original)? {
+            Converted::Written(written) => Ok(Some(written)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Converts one image, or the parts of one split image, to `target_ext`.
+    ///
+    /// `merged_stem` is the name the parts share, and is what makes this a
+    /// merge: with it the inputs are stacked into a single image and the
+    /// already-in-target-format skip does not apply, since merging N files into
+    /// one is work even when the format stays the same.
+    fn convert_group(
+        &self,
+        inputs: &[std::path::PathBuf],
+        merged_stem: Option<&str>,
+        target_ext: &str,
+        delete_original: bool,
+    ) -> Result<Converted> {
+        let first = inputs
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("Nothing to convert"))?;
+        let first_path = first.to_string_lossy().into_owned();
+
+        if merged_stem.is_none() && has_extension(first, target_ext) {
+            self.log(
+                log::Level::Info,
+                &format!("Already {}: {} — skipped", target_ext, first_path),
+            );
+            return Ok(Converted::AlreadyTarget);
+        }
+
+        let stem = match merged_stem {
+            Some(stem) => stem,
+            None => first
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .ok_or_else(|| anyhow::anyhow!("Input filename cannot be empty"))?,
+        };
+        let output_path = first
+            .with_file_name(build_output_path(stem, target_ext))
             .to_string_lossy()
             .into_owned();
 
@@ -671,11 +811,44 @@ impl ScreenCapture {
             ));
         }
 
-        let img = open_image(input_path)?;
-        self.log(
-            log::Level::Info,
-            &format!("Loaded: {} ({}x{})", input_path, img.width(), img.height()),
-        );
+        let img = if merged_stem.is_some() {
+            self.log(
+                log::Level::Info,
+                &format!(
+                    "Merging {} parts of {} into {}",
+                    inputs.len(),
+                    stem,
+                    output_path
+                ),
+            );
+            match merge_parts(inputs)? {
+                Some(img) => {
+                    self.log(
+                        log::Level::Info,
+                        &format!("Merged: {}x{}", img.width(), img.height()),
+                    );
+                    img
+                }
+                None => {
+                    self.log(
+                        log::Level::Info,
+                        &format!(
+                            "{}_1..{} differ in width, so they are not one split image — converting them separately",
+                            stem,
+                            inputs.len()
+                        ),
+                    );
+                    return Ok(Converted::NotOneImage);
+                }
+            }
+        } else {
+            let img = open_image(&first_path)?;
+            self.log(
+                log::Level::Info,
+                &format!("Loaded: {} ({}x{})", first_path, img.width(), img.height()),
+            );
+            img
+        };
 
         let written = save_image(&img, &output_path)?;
         if written.len() > 1 {
@@ -703,25 +876,31 @@ impl ScreenCapture {
             })?;
             self.log(
                 log::Level::Info,
-                &format!("Verified lossless against {}", input_path),
+                &format!("Verified lossless against {}", join_paths(inputs)),
             );
-            match std::fs::remove_file(input_path) {
-                Ok(()) => self.log(
-                    log::Level::Info,
-                    &format!("Deleted original: {}", input_path),
-                ),
-                Err(e) => self.log(
-                    log::Level::Warn,
-                    &format!("Converted, but failed to delete {}: {}", input_path, e),
-                ),
+            for input in inputs {
+                let path = input.to_string_lossy().into_owned();
+                match std::fs::remove_file(input) {
+                    Ok(()) => self.log(log::Level::Info, &format!("Deleted original: {}", path)),
+                    Err(e) => self.log(
+                        log::Level::Warn,
+                        &format!("Converted, but failed to delete {}: {}", path, e),
+                    ),
+                }
             }
         }
 
-        Ok(Some(written))
+        Ok(Converted::Written(written))
     }
 
     /// Converts every image directly inside `folder_path`. Returns
     /// (converted, skipped, failed), and nothing stops the run.
+    ///
+    /// A `<stem>_1` .. `<stem>_N` run counts as one image, and one conversion:
+    /// its parts are stacked back together whenever the target format can hold
+    /// them whole. Each merge is attempted at its first part, so parts that turn
+    /// out not to belong together are still converted one by one further down
+    /// the list.
     ///
     /// Failures are counted apart from skips because a bulk migration run with
     /// `delete_original` set needs to make a broken file obvious, not bury it
@@ -745,9 +924,18 @@ impl ScreenCapture {
             &format!("Found {} image(s) to convert", files.len()),
         );
 
+        let target_ext = format.trim_start_matches('.').to_lowercase();
+        let merges = format_takes_whole_image(&target_ext);
+
         let mut converted_count = 0;
         let mut skipped_count = 0;
         let mut failed_count = 0;
+        let mut merged: std::collections::HashSet<std::path::PathBuf> =
+            std::collections::HashSet::new();
+        // Runs that looked numbered but are not one image, so the rest of the
+        // run does not pay for the same failed merge again.
+        let mut unmergeable: std::collections::HashSet<std::path::PathBuf> =
+            std::collections::HashSet::new();
         let total = files.len();
 
         for (i, path) in files.iter().enumerate() {
@@ -758,15 +946,62 @@ impl ScreenCapture {
                 .into_owned();
             on_progress(i + 1, total, &file_name);
 
+            // Already folded into an earlier part's merge.
+            if merged.contains(path) {
+                continue;
+            }
+
             let path_str = path.to_string_lossy().into_owned();
             self.log(
                 log::Level::Info,
                 &format!("[{}/{}] {}", i + 1, total, path_str),
             );
 
-            match self.convert_image(&path_str, format, delete_original) {
-                Ok(Some(_)) => converted_count += 1,
-                Ok(None) => skipped_count += 1,
+            let group = if merges && !unmergeable.contains(path) {
+                sibling_parts(path)
+            } else {
+                None
+            };
+            let result = match &group {
+                Some((stem, parts)) => {
+                    self.convert_group(parts, Some(stem), &target_ext, delete_original)
+                }
+                None => self.convert_group(
+                    std::slice::from_ref(path),
+                    None,
+                    &target_ext,
+                    delete_original,
+                ),
+            };
+
+            match result {
+                Ok(Converted::Written(_)) => {
+                    converted_count += 1;
+                    if let Some((_, parts)) = group {
+                        merged.extend(parts);
+                    }
+                }
+                Ok(Converted::AlreadyTarget) => skipped_count += 1,
+                // Not one image after all, so this part converts on its own and
+                // the rest of the run is left for their own turns.
+                Ok(Converted::NotOneImage) => {
+                    if let Some((_, parts)) = group {
+                        unmergeable.extend(parts);
+                    }
+                    match self.convert_group(
+                        std::slice::from_ref(path),
+                        None,
+                        &target_ext,
+                        delete_original,
+                    ) {
+                        Ok(Converted::Written(_)) => converted_count += 1,
+                        Ok(_) => skipped_count += 1,
+                        Err(e) => {
+                            self.log(log::Level::Warn, &format!("  → Error: {}", e));
+                            failed_count += 1;
+                        }
+                    }
+                }
                 Err(e) => {
                     self.log(log::Level::Warn, &format!("  → Error: {}", e));
                     failed_count += 1;
@@ -1973,6 +2208,200 @@ mod tests {
     }
 
     #[test]
+    fn part_number_reads_only_save_image_part_names() {
+        let part = |name: &str| part_number(std::path::Path::new(name));
+
+        assert_eq!(part("ch01_1.webp"), Some(("ch01".into(), 1)));
+        assert_eq!(part("ch01_07.webp"), Some(("ch01".into(), 7)));
+        assert_eq!(part("a_b_2.webp"), Some(("a_b".into(), 2)));
+        assert_eq!(part("cover.webp"), None);
+        assert_eq!(part("ch01_.webp"), None);
+        assert_eq!(part("_1.webp"), None);
+        assert_eq!(part("ch01_2b.webp"), None);
+    }
+
+    /// Two files whose names happen to end in numbers are not a split image.
+    #[test]
+    fn sibling_parts_needs_a_gapless_run() {
+        let dir = TempDir::new("siblings");
+        let img = noisy_image(4, 10);
+        img.save(dir.path("ch01_1.webp")).unwrap();
+        img.save(dir.path("ch01_3.webp")).unwrap();
+        img.save(dir.path("solo_1.webp")).unwrap();
+        img.save(dir.path("mixed_2.png")).unwrap();
+        img.save(dir.path("mixed_1.webp")).unwrap();
+
+        for name in ["ch01_1.webp", "solo_1.webp", "mixed_1.webp"] {
+            let path = dir.path(name);
+            assert!(
+                sibling_parts(std::path::Path::new(&path)).is_none(),
+                "{name} is not part of a complete run"
+            );
+        }
+    }
+
+    /// Parts exist only because WebP cannot hold a whole chapter, so converting
+    /// them to a format that can puts the chapter back into one file.
+    #[test]
+    fn convert_image_merges_parts_into_one_file() {
+        let dir = TempDir::new("merge-parts");
+        let top = noisy_image(8, 120);
+        let bottom = noisy_image(8, 80);
+        top.save(dir.path("ch01_1.webp")).unwrap();
+        bottom.save(dir.path("ch01_2.webp")).unwrap();
+
+        let written = ScreenCapture::new()
+            .convert_image(&dir.path("ch01_1.webp"), "png", false)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(written, vec![dir.path("ch01.png")]);
+        let merged = image::open(&written[0]).unwrap().to_rgba8();
+        assert_eq!(merged.dimensions(), (8, 200));
+        let expected: Vec<u8> = top
+            .as_raw()
+            .iter()
+            .chain(bottom.as_raw())
+            .copied()
+            .collect();
+        assert_eq!(merged.as_raw(), &expected, "parts must stack in order");
+    }
+
+    /// The run is found from the folder, not from which part was pointed at.
+    #[test]
+    fn convert_image_merges_when_pointed_at_a_later_part() {
+        let dir = TempDir::new("merge-later-part");
+        noisy_image(8, 40).save(dir.path("ch01_1.webp")).unwrap();
+        noisy_image(8, 40).save(dir.path("ch01_2.webp")).unwrap();
+
+        let written = ScreenCapture::new()
+            .convert_image(&dir.path("ch01_2.webp"), "png", false)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(written, vec![dir.path("ch01.png")]);
+    }
+
+    /// Two parts in the target format are still two files, so the merge is the
+    /// work being asked for even though the extension does not change.
+    #[test]
+    fn convert_image_merges_parts_already_in_the_target_format() {
+        let dir = TempDir::new("merge-same-format");
+        noisy_image(8, 40).save(dir.path("ch01_1.png")).unwrap();
+        noisy_image(8, 40).save(dir.path("ch01_2.png")).unwrap();
+
+        let written = ScreenCapture::new()
+            .convert_image(&dir.path("ch01_1.png"), "png", false)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(written, vec![dir.path("ch01.png")]);
+        assert_eq!(height_of(&written[0]), 80);
+    }
+
+    /// Merging into WebP would only be undone by the split that follows it.
+    #[test]
+    fn convert_image_does_not_merge_into_a_format_with_a_height_limit() {
+        let dir = TempDir::new("merge-webp-target");
+        noisy_image(8, 40).save(dir.path("ch01_1.png")).unwrap();
+        noisy_image(8, 40).save(dir.path("ch01_2.png")).unwrap();
+
+        let written = ScreenCapture::new()
+            .convert_image(&dir.path("ch01_1.png"), "webp", false)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(written, vec![dir.path("ch01_1.webp")]);
+    }
+
+    #[test]
+    fn convert_image_leaves_a_lone_numbered_file_alone() {
+        let dir = TempDir::new("merge-lone");
+        noisy_image(8, 40).save(dir.path("photo_7.webp")).unwrap();
+
+        let written = ScreenCapture::new()
+            .convert_image(&dir.path("photo_7.webp"), "png", false)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(written, vec![dir.path("photo_7.png")]);
+    }
+
+    /// A split keeps the width, so numbered files of different widths are an
+    /// ordinary numbered set and must convert one by one.
+    #[test]
+    fn convert_image_falls_back_when_parts_differ_in_width() {
+        let dir = TempDir::new("merge-mismatch");
+        noisy_image(8, 40).save(dir.path("photo_1.webp")).unwrap();
+        noisy_image(12, 40).save(dir.path("photo_2.webp")).unwrap();
+
+        let written = ScreenCapture::new()
+            .convert_image(&dir.path("photo_1.webp"), "png", false)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(written, vec![dir.path("photo_1.png")]);
+        assert!(!std::path::Path::new(&dir.path("photo.png")).exists());
+    }
+
+    /// The merged file stands in for every part, so none of them may survive a
+    /// verified delete.
+    #[test]
+    fn convert_image_deletes_every_merged_part() {
+        let dir = TempDir::new("merge-delete");
+        noisy_image(8, 40).save(dir.path("ch01_1.webp")).unwrap();
+        noisy_image(8, 60).save(dir.path("ch01_2.webp")).unwrap();
+
+        ScreenCapture::new()
+            .convert_image(&dir.path("ch01_1.webp"), "png", true)
+            .unwrap()
+            .unwrap();
+
+        assert!(std::path::Path::new(&dir.path("ch01.png")).exists());
+        assert!(!std::path::Path::new(&dir.path("ch01_1.webp")).exists());
+        assert!(!std::path::Path::new(&dir.path("ch01_2.webp")).exists());
+    }
+
+    #[test]
+    fn convert_images_in_folder_counts_a_merged_run_once() {
+        let dir = TempDir::new("merge-folder");
+        for part in 1..=3 {
+            noisy_image(8, 40)
+                .save(dir.path(&format!("ch01_{}.webp", part)))
+                .unwrap();
+        }
+        noisy_image(8, 40).save(dir.path("cover.webp")).unwrap();
+
+        let folder = dir.0.to_string_lossy().into_owned();
+        let counts = ScreenCapture::new()
+            .convert_images_in_folder(&folder, "png", false, |_, _, _| {})
+            .unwrap();
+
+        assert_eq!(counts, (2, 0, 0), "the run counts as one conversion");
+        assert_eq!(height_of(&dir.path("ch01.png")), 120);
+        assert!(std::path::Path::new(&dir.path("cover.png")).exists());
+        assert!(!std::path::Path::new(&dir.path("ch01_1.png")).exists());
+    }
+
+    /// A failed merge must not swallow the rest of the run.
+    #[test]
+    fn convert_images_in_folder_converts_mismatched_parts_one_by_one() {
+        let dir = TempDir::new("merge-folder-mismatch");
+        noisy_image(8, 40).save(dir.path("photo_1.webp")).unwrap();
+        noisy_image(12, 40).save(dir.path("photo_2.webp")).unwrap();
+
+        let folder = dir.0.to_string_lossy().into_owned();
+        let counts = ScreenCapture::new()
+            .convert_images_in_folder(&folder, "png", false, |_, _, _| {})
+            .unwrap();
+
+        assert_eq!(counts, (2, 0, 0));
+        assert!(std::path::Path::new(&dir.path("photo_1.png")).exists());
+        assert!(std::path::Path::new(&dir.path("photo_2.png")).exists());
+        assert!(!std::path::Path::new(&dir.path("photo.png")).exists());
+    }
+
+    #[test]
     fn save_image_rejects_too_wide_webp() {
         let dir = TempDir::new("wide-webp");
         let path = dir.path("out.webp");
@@ -2007,12 +2436,12 @@ mod tests {
         assert_eq!(open_image(&path).unwrap().dimensions(), img.dimensions());
     }
 
-    /// JXL could hold a tall capture whole, but it is cut at the same rows as
-    /// WebP so an archive and its reading copy stay part for part identical.
+    /// JXL allows 2^30 rows, so a chapter stays one file however tall it is.
+    /// Only the WebP reading copy is cut into pages.
     #[test]
-    fn save_image_splits_tall_jxl_like_webp() {
+    fn save_image_keeps_tall_jxl_as_one_file() {
         needs_jxl!();
-        let dir = TempDir::new("split-jxl");
+        let dir = TempDir::new("tall-jxl");
         let jxl = dir.path("out.jxl");
         let webp = dir.path("out.webp");
         let img = noisy_image(8, 40_000);
@@ -2020,34 +2449,22 @@ mod tests {
         let jxl_parts = save_image(&img, &jxl).unwrap();
         let webp_parts = save_image(&img, &webp).unwrap();
 
-        assert_eq!(jxl_parts.len(), webp_parts.len());
-        assert_eq!(jxl_parts[0], dir.path("out_1.jxl"));
-        let heights: Vec<u32> = jxl_parts
-            .iter()
-            .map(|p| open_image(p).unwrap().height())
-            .collect();
-        assert_eq!(heights.iter().sum::<u32>(), img.height());
-        assert_eq!(
-            heights,
-            webp_parts
-                .iter()
-                .map(|p| height_of(p))
-                .collect::<Vec<u32>>(),
-            "JXL and WebP must cut at the same rows"
-        );
+        assert_eq!(jxl_parts, vec![jxl.clone()]);
+        assert_eq!(open_image(&jxl).unwrap().dimensions(), img.dimensions());
+        assert_eq!(webp_parts.len(), 3, "WebP still pages at its own limit");
     }
 
     /// The entire reason for choosing JXL here is that `-d 0` is mathematically
-    /// lossless, so every part must decode back to the exact source rows.
+    /// lossless, so a tall capture must decode back to the exact source rows.
     #[test]
-    fn jxl_split_roundtrip_is_lossless() {
+    fn jxl_roundtrip_is_lossless() {
         needs_jxl!();
         let dir = TempDir::new("lossless-jxl");
         let path = dir.path("out.jxl");
         let img = noisy_image(16, 20_000);
 
         let written = save_image(&img, &path).unwrap();
-        assert_eq!(written.len(), 2);
+        assert_eq!(written.len(), 1);
 
         verify_written_matches(&img, &written).unwrap();
     }

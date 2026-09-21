@@ -1919,7 +1919,7 @@ impl CaptureApp {
         ui.label("Re-encodes existing captures into the chosen format, next to the originals.");
         ui.label(
             egui::RichText::new(
-                "WebP is lossless here; captures taller than 16383px are split into numbered parts.",
+                "WebP is lossless here; only WebP is split into numbered parts, past 16383px tall.",
             )
             .weak(),
         );
@@ -2044,6 +2044,12 @@ impl CaptureApp {
             ui.label(
                 egui::RichText::new(
                     "Files already in the target format are skipped, and an existing file with the same name is never overwritten.",
+                )
+                .weak(),
+            );
+            ui.label(
+                egui::RichText::new(
+                    "A chapter split into ch01_1, ch01_2 ... is merged back into one ch01 file, unless the target format is WebP.",
                 )
                 .weak(),
             );
