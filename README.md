@@ -123,8 +123,12 @@ parts:
 00_1.webp  00_2.webp  00_3.webp  ...
 ```
 
-JXL allows 2^30 per side, so a chapter is one `.jxl` however tall it is, and the
-paging into readable pages happens in the WebP copy made from it.
+JXL is never split, so a chapter is one `.jxl` and the paging into readable pages
+happens in the WebP copy made from it. Its own ceiling is far away: level 5, the
+most widely supported level, takes **262144px per side and 2^28 pixels in total**,
+which at typical webtoon widths means a height limit around 262144px — three
+times the tallest capture measured here. Past that, `cjxl` silently writes a
+level 10 file (2^30 per side) that some viewers refuse, rather than failing.
 
 Part numbers are zero-padded when there are ten or more, so they stay in order.
 A WebP wider than 16383px cannot be split vertically and is rejected — use a

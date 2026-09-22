@@ -253,9 +253,16 @@ pub fn validate_encoder(format: &str) -> Result<()> {
 /// The tallest part [`save_image`] will write for this output path, or `None`
 /// when the format takes the image whole.
 ///
-/// For WebP this is a hard format limit. JPEG XL allows 2^30 and so keeps a
-/// chapter in one file: the archive is one image per chapter, and the WebP
-/// reading copy made from it is where the 16383px page split happens.
+/// For WebP this is a hard format limit. JPEG XL keeps a chapter in one file:
+/// the archive is one image per chapter, and the WebP reading copy made from it
+/// is where the 16383px page split happens.
+///
+/// JXL's own limit is far enough away to leave unguarded. Level 5, the level
+/// decoders support most widely, allows 2^18 = 262144 px per side and 2^28
+/// pixels in total, so a capture up to 1024px wide can be 262144px tall — three
+/// times the tallest one measured here. Beyond that `cjxl` does not fail: its
+/// default `--codestream_level=-1` quietly writes a level 10 file (2^30 per
+/// side), which some viewers refuse.
 fn max_part_height(path: &std::path::Path) -> Option<u32> {
     if has_extension(path, "webp") {
         Some(WEBP_MAX_DIMENSION)
