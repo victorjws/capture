@@ -80,6 +80,15 @@ pub const WEBP_MAX_DIMENSION: u32 = 16383;
 /// not worth paying on every capture.
 const JXL_EFFORT: &str = "7";
 
+/// Inputs cjxl reads itself, so converting one to JXL can hand over the file
+/// instead of the pixels decoded out of it.
+///
+/// cjxl also reads PPM/PNM/PFM/PAM/PGX/EXR, but none of those are inputs this
+/// program accepts (see [`IMAGE_EXTENSIONS`]). `.jxl` is left out on purpose:
+/// a lone one is already in the target format and a numbered run of them is a
+/// merge, and neither goes through here.
+const CJXL_DIRECT_INPUT: &[&str] = &["jpg", "jpeg", "png", "gif"];
+
 /// Shown wherever a missing cjxl or djxl is what actually went wrong, since the
 /// bare "No such file or directory" from a failed spawn tells nobody anything.
 const JXL_TOOLS_HINT: &str = "JPEG XL needs the libjxl command line tools (cjxl and djxl).\n\
@@ -93,6 +102,11 @@ fn has_extension(path: impl AsRef<std::path::Path>, ext: &str) -> bool {
         .and_then(|e| e.to_str())
         .map(|e| e.eq_ignore_ascii_case(ext))
         .unwrap_or(false)
+}
+
+/// True when `path` ends in any of `exts`, ignoring case.
+fn has_any_extension(path: impl AsRef<std::path::Path>, exts: &[&str]) -> bool {
+    exts.iter().any(|ext| has_extension(&path, ext))
 }
 
 /// True when the libjxl command line tools are installed. Probed once, since
@@ -159,6 +173,31 @@ fn write_pnm_temp(img: &RgbaImage) -> Result<TempFile> {
     Ok(temp)
 }
 
+/// Writes a PNM whose samples are already laid out the way the format wants, so
+/// the header is the only work.
+fn write_raw_pnm_temp(
+    ext: &str,
+    magic: &str,
+    width: u32,
+    height: u32,
+    samples: &[u8],
+) -> Result<TempFile> {
+    use std::io::Write;
+
+    let temp = TempFile::new(ext);
+    let file = std::fs::File::create(temp.path())
+        .map_err(|e| anyhow::anyhow!("Failed to create {}: {}", temp.path().display(), e))?;
+    let mut out = std::io::BufWriter::new(file);
+    let write = |out: &mut std::io::BufWriter<std::fs::File>| -> std::io::Result<()> {
+        write!(out, "{}\n{} {}\n255\n", magic, width, height)?;
+        out.write_all(samples)?;
+        out.flush()
+    };
+    write(&mut out)
+        .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", temp.path().display(), e))?;
+    Ok(temp)
+}
+
 fn write_pnm(out: &mut impl std::io::Write, img: &RgbaImage, opaque: bool) -> std::io::Result<()> {
     if opaque {
         write!(out, "P6\n{} {}\n255\n", img.width(), img.height())?;
@@ -202,6 +241,125 @@ fn encode_jxl(img: &RgbaImage, output_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Encodes a file cjxl can read by handing over the file itself, never the
+/// pixels decoded out of it.
+///
+/// Decoding first is what made a JPEG grow: the pixels a JPEG decodes to carry
+/// every ringing and blocking artifact it baked in, and reproducing that noise
+/// bit for bit costs several times what the JPEG spent throwing it away. Given
+/// the file, cjxl instead transcodes — it lifts the quantized DCT coefficients
+/// out without ever running an inverse DCT and repacks them with its own
+/// entropy coder, so the image is unchanged and the file lands 16-22% smaller.
+/// A `jbrd` box carries the JPEG's headers, so `djxl out.jxl out.jpg` returns
+/// the original file byte for byte.
+///
+/// The same applies to everything else cjxl reads: bit depth, grayscale, the
+/// ICC profile, Exif, XMP and every frame of an animation come along because
+/// they never pass through us.
+///
+/// `--allow_jpeg_reconstruction=0` and `-x strip=` must never be added here.
+/// Both discard what makes the result reconstructible.
+fn encode_jxl_from_file(input: &std::path::Path, output_path: &str) -> Result<()> {
+    // -d 0 is redundant for JPEG and GIF, whose default distance is already 0,
+    // and lossless JPEG transcoding takes precedence over it either way. It is
+    // what makes PNG and the rest lossless, so it stays.
+    let result = std::process::Command::new("cjxl")
+        .arg(input)
+        .arg(output_path)
+        .args(["-d", "0", "-e", JXL_EFFORT, "--quiet"])
+        .output()
+        .map_err(|e| anyhow::anyhow!("Failed to run cjxl: {}\n{}", e, JXL_TOOLS_HINT))?;
+
+    if !result.status.success() {
+        return Err(anyhow::anyhow!(
+            "cjxl failed for {}: {}",
+            output_path,
+            String::from_utf8_lossy(&result.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// A scratch file cjxl can read, by the cheapest route that keeps everything.
+///
+/// Raw PNM samples where the pixels are already 8 bits and there is no profile to
+/// embed: PNG-encoding a tall capture costs more than the JXL encode itself, and
+/// this is the path the 690x85231 archive conversion takes. Anything deeper, or
+/// carrying an ICC profile, goes out as a PNG, which holds both and a PNM holds
+/// neither.
+fn write_scratch_for_cjxl(source: &SourceImage) -> Result<TempFile> {
+    if source.icc.is_none() {
+        let (w, h) = (source.img.width(), source.img.height());
+        match &source.img {
+            image::DynamicImage::ImageRgba8(img) => return write_pnm_temp(img),
+            image::DynamicImage::ImageRgb8(img) => {
+                return write_raw_pnm_temp("ppm", "P6", w, h, img.as_raw());
+            }
+            image::DynamicImage::ImageLuma8(img) => {
+                return write_raw_pnm_temp("pgm", "P5", w, h, img.as_raw());
+            }
+            _ => {}
+        }
+    }
+
+    let temp = TempFile::new("png");
+    write_dynamic(
+        &source.img,
+        &temp.path().to_string_lossy(),
+        Metadata {
+            icc: source.icc.as_deref(),
+            exif: None,
+        },
+    )?;
+    Ok(temp)
+}
+
+/// Encodes a source cjxl cannot read itself, keeping what the pixels alone
+/// would not carry.
+///
+/// Only WebP, BMP and TIFF get here; cjxl reads every other input this program
+/// accepts, and those go through [`encode_jxl_from_file`]. The scratch file is a
+/// PNG rather than the PNM the capture path writes because [`write_pnm`] only
+/// speaks 8-bit RGB and RGBA, while a PNG holds 16-bit samples, a grayscale
+/// channel count and the ICC profile in one go. Exif is handed over separately
+/// since cjxl reads it from a flag but not from a PNG chunk.
+fn encode_jxl_from_source(source: &SourceImage, output_path: &str) -> Result<()> {
+    let temp = write_scratch_for_cjxl(source)?;
+
+    let exif = match &source.exif {
+        Some(bytes) => {
+            let file = TempFile::new("exif");
+            std::fs::write(file.path(), bytes)
+                .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", file.path().display(), e))?;
+            Some(file)
+        }
+        None => None,
+    };
+
+    let mut command = std::process::Command::new("cjxl");
+    command
+        .arg(temp.path())
+        .arg(output_path)
+        .args(["-d", "0", "-e", JXL_EFFORT, "--quiet"]);
+    if let Some(exif) = &exif {
+        command
+            .arg("-x")
+            .arg(format!("exif={}", exif.path().display()));
+    }
+
+    let result = command
+        .output()
+        .map_err(|e| anyhow::anyhow!("Failed to run cjxl: {}\n{}", e, JXL_TOOLS_HINT))?;
+    if !result.status.success() {
+        return Err(anyhow::anyhow!(
+            "cjxl failed for {}: {}",
+            output_path,
+            String::from_utf8_lossy(&result.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
 /// Decodes a JPEG XL file via djxl. The `image` crate has no JXL support, so
 /// the round trip goes through a PNG the decoder does understand.
 fn decode_jxl(input_path: &str) -> Result<RgbaImage> {
@@ -234,6 +392,227 @@ pub fn open_image(input_path: &str) -> Result<RgbaImage> {
         Ok(image::open(input_path)
             .map_err(|e| anyhow::anyhow!("Failed to open image: {}", e))?
             .to_rgba8())
+    }
+}
+
+/// A file a conversion opened: the pixels at the depth they are actually
+/// stored, plus what the source carried beside them.
+///
+/// [`open_image`] flattens everything to 8-bit RGBA, which is right for a
+/// screenshot and wrong for a conversion. `xcap` hands over an `RgbaImage` and
+/// the capture pipeline is built on that type, so the convert path reused it and
+/// coerced whatever it read to match — halving a 16-bit PNG, dropping the ICC
+/// profile that says what the colors mean, and keeping only the first frame of
+/// an animation. This keeps all of it so the writer can decide what survives.
+struct SourceImage {
+    img: image::DynamicImage,
+    icc: Option<Vec<u8>>,
+    exif: Option<Vec<u8>>,
+    orientation: image::metadata::Orientation,
+    /// Frames past the first. No target reachable through the pixel path can
+    /// hold them, so their presence is a refusal rather than a warning.
+    extra_frames: usize,
+}
+
+impl SourceImage {
+    fn bits_per_channel(&self) -> u16 {
+        bits_per_channel(self.img.color())
+    }
+
+    /// What `target_ext` cannot carry across, in words fit for an error message.
+    ///
+    /// Only worth asking before deleting an original. A reading copy is welcome
+    /// to be 8-bit sRGB; an archive that replaces the original is not.
+    fn losses_for(&self, target_ext: &str) -> Vec<String> {
+        let mut lost = Vec::new();
+        let bits = self.bits_per_channel();
+        if self.extra_frames > 0 {
+            // JXL can hold an animation, but only when cjxl reads the file
+            // itself. Reaching here means the pixels are being handed over one
+            // image at a time, so the rest of the frames are gone either way.
+            lost.push(format!(
+                "only the first of {} frames is kept, since the pixels are handed to {} one image at a time",
+                self.extra_frames + 1,
+                target_ext
+            ));
+        }
+        if bits > 8 && !format_holds_deep_pixels(target_ext) {
+            lost.push(format!(
+                "{} holds 8 bits per channel, not the {} this image has",
+                target_ext, bits
+            ));
+        }
+        if self.exif.is_some() && !format_holds_exif(target_ext) {
+            lost.push(format!("{} cannot store the Exif metadata", target_ext));
+        }
+        if self.icc.is_some() && !format_holds_icc(target_ext) {
+            lost.push(format!(
+                "{} cannot store the ICC colour profile",
+                target_ext
+            ));
+        }
+        lost
+    }
+
+    fn metadata(&self) -> Metadata<'_> {
+        Metadata {
+            icc: self.icc.as_deref(),
+            exif: self.exif.as_deref(),
+        }
+    }
+
+    /// Turns the Exif orientation into actual rotated pixels, for targets that
+    /// cannot carry the tag.
+    ///
+    /// Without this a photo taken sideways comes out sideways: the `image` crate
+    /// does not apply the tag on read, so the pixels are stored rotated and only
+    /// the tag says so. Targets that keep Exif are left alone, where passing the
+    /// tag through means the result reads exactly like the source.
+    fn bake_orientation(&mut self) -> bool {
+        if self.orientation == image::metadata::Orientation::NoTransforms {
+            return false;
+        }
+        self.img.apply_orientation(self.orientation);
+        self.orientation = image::metadata::Orientation::NoTransforms;
+        true
+    }
+}
+
+/// Writes a converted source, carrying across whatever `target_ext` can hold.
+fn write_converted(
+    source: &SourceImage,
+    output_path: &str,
+    target_ext: &str,
+) -> Result<Vec<String>> {
+    if target_ext == "jxl" {
+        encode_jxl_from_source(source, output_path)?;
+        return Ok(vec![output_path.to_string()]);
+    }
+    if source.bits_per_channel() > 8 && format_holds_deep_pixels(target_ext) {
+        write_dynamic(&source.img, output_path, source.metadata())?;
+        return Ok(vec![output_path.to_string()]);
+    }
+    // Borrowed where it already is 8-bit RGBA, since `to_rgba8` would clone the
+    // whole buffer, and a scroll capture's buffer runs to hundreds of megabytes.
+    match &source.img {
+        image::DynamicImage::ImageRgba8(img) => {
+            save_image_with(img, output_path, source.metadata())
+        }
+        other => save_image_with(&other.to_rgba8(), output_path, source.metadata()),
+    }
+}
+
+/// True for targets that can store Exif. TIFF is missing because the encoder
+/// here implements `set_icc_profile` but not `set_exif_metadata`.
+fn format_holds_exif(format: &str) -> bool {
+    matches!(format, "jxl" | "png" | "webp" | "jpg" | "jpeg")
+}
+
+/// True for targets that keep more than 8 bits per channel. WebP is 8-bit in
+/// this encoder (`L8`/`La8`/`Rgb8`/`Rgba8` only) and baseline JPEG is 8-bit by
+/// definition.
+fn format_holds_deep_pixels(format: &str) -> bool {
+    matches!(format, "jxl" | "png" | "tiff" | "tif")
+}
+
+/// True for targets whose encoder here can embed an ICC profile.
+fn format_holds_icc(format: &str) -> bool {
+    matches!(
+        format,
+        "jxl" | "png" | "tiff" | "tif" | "webp" | "jpg" | "jpeg"
+    )
+}
+
+/// Loads a file for conversion without flattening it.
+///
+/// Refuses an animated WebP outright: the frames can be read but there is no
+/// lossless way to hand them on — cjxl does not read WebP, `PngEncoder` does not
+/// write APNG, and a GIF would quantise to 256 colours. Silently keeping frame
+/// one is worse than saying so.
+fn open_source_image(input_path: &str) -> Result<SourceImage> {
+    use image::ImageDecoder;
+
+    if has_extension(input_path, "jxl") {
+        return Ok(SourceImage {
+            img: image::DynamicImage::ImageRgba8(decode_jxl(input_path)?),
+            icc: None,
+            exif: None,
+            orientation: image::metadata::Orientation::NoTransforms,
+            extra_frames: 0,
+        });
+    }
+
+    let path = std::path::Path::new(input_path);
+    let mut decoder = image::ImageReader::open(path)
+        .map_err(|e| anyhow::anyhow!("Failed to open {}: {}", input_path, e))?
+        .with_guessed_format()
+        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", input_path, e))?
+        .into_decoder()
+        .map_err(|e| anyhow::anyhow!("Failed to decode {}: {}", input_path, e))?;
+
+    // Read the metadata off the decoder before the pixels consume it.
+    let icc = decoder.icc_profile().unwrap_or(None);
+    let exif = decoder.exif_metadata().unwrap_or(None);
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+
+    let extra_frames = count_extra_frames(path)?;
+    if extra_frames > 0 && has_extension(path, "webp") {
+        return Err(anyhow::anyhow!(
+            "{} is an animated WebP with {} frames, and none of the formats reachable from here \
+             can hold them losslessly.\nConvert it with a tool that keeps the animation, or use \
+             --format png to keep the first frame on purpose.",
+            input_path,
+            extra_frames + 1
+        ));
+    }
+
+    let img = image::DynamicImage::from_decoder(decoder)
+        .map_err(|e| anyhow::anyhow!("Failed to decode {}: {}", input_path, e))?;
+
+    Ok(SourceImage {
+        img,
+        icc,
+        exif,
+        orientation,
+        extra_frames,
+    })
+}
+
+/// Frames past the first in `path`, and 0 for anything not animated.
+///
+/// The cheap header check comes first, so an ordinary single-frame PNG is never
+/// decoded here only to be decoded again for its pixels.
+fn count_extra_frames(path: &std::path::Path) -> Result<usize> {
+    let animated = if has_extension(path, "gif") {
+        true
+    } else if has_extension(path, "png") {
+        let file = std::io::BufReader::new(
+            std::fs::File::open(path)
+                .map_err(|e| anyhow::anyhow!("Failed to open {}: {}", path.display(), e))?,
+        );
+        image::codecs::png::PngDecoder::new(file)
+            .and_then(|d| d.is_apng())
+            .unwrap_or(false)
+    } else if has_extension(path, "webp") {
+        let file = std::io::BufReader::new(
+            std::fs::File::open(path)
+                .map_err(|e| anyhow::anyhow!("Failed to open {}: {}", path.display(), e))?,
+        );
+        image::codecs::webp::WebPDecoder::new(file)
+            .map(|d| d.has_animation())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    if !animated {
+        return Ok(0);
+    }
+    match read_pixels(path)? {
+        Pixels::Frames(frames) => Ok(frames.len().saturating_sub(1)),
+        Pixels::Still(_) => Ok(0),
     }
 }
 
@@ -281,15 +660,150 @@ fn split_heights(height: u32, parts: u32) -> Vec<u32> {
         .collect()
 }
 
+/// What a source carried beside its pixels, to be embedded wherever the target
+/// format can hold it.
+#[derive(Default, Clone, Copy)]
+struct Metadata<'a> {
+    icc: Option<&'a [u8]>,
+    exif: Option<&'a [u8]>,
+}
+
+impl Metadata<'_> {
+    fn is_empty(&self) -> bool {
+        self.icc.is_none() && self.exif.is_none()
+    }
+}
+
+/// Writes raw samples through the encoder for `path`, embedding what `meta`
+/// carries and the format accepts.
+///
+/// `set_icc_profile` and `set_exif_metadata` are only reachable on an encoder
+/// built by hand, which is why this exists at all: `DynamicImage::save` builds
+/// one internally and gives no way in. A format that cannot hold a piece of
+/// metadata is not an error here — [`SourceImage::losses_for`] is what reports
+/// that, before anything gets deleted.
+fn encode_with_metadata(
+    path: &str,
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    color: image::ExtendedColorType,
+    meta: Metadata,
+) -> Result<()> {
+    use image::ImageEncoder;
+
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+    if !format_holds_metadata(path) {
+        return Err(anyhow::anyhow!(
+            "{} cannot carry metadata, and should not have been asked to",
+            path
+        ));
+    }
+
+    // Created only once the format is known, so an unsupported one leaves no
+    // empty file behind. TiffEncoder wants Seek, which BufWriter<File> has.
+    let file = std::fs::File::create(path)
+        .map_err(|e| anyhow::anyhow!("Failed to create {}: {}", path, e))?;
+    let out = std::io::BufWriter::new(file);
+    let fail = |e: image::ImageError| anyhow::anyhow!("Failed to save {}: {}", path, e);
+
+    // Each encoder takes `self` by value in `write_image`, so this cannot be a
+    // trait object and every arm has to finish the write itself. A format that
+    // cannot hold one of these is a no-op, not an error: refusing is
+    // [`SourceImage::losses_for`]'s job, before anything is deleted.
+    macro_rules! encode {
+        ($encoder:expr) => {{
+            let mut encoder = $encoder;
+            if let Some(icc) = meta.icc {
+                let _ = encoder.set_icc_profile(icc.to_vec());
+            }
+            if let Some(exif) = meta.exif {
+                let _ = encoder.set_exif_metadata(exif.to_vec());
+            }
+            encoder
+                .write_image(bytes, width, height, color)
+                .map_err(fail)
+        }};
+    }
+
+    match ext.as_str() {
+        "png" => encode!(image::codecs::png::PngEncoder::new(out)),
+        "webp" => encode!(image::codecs::webp::WebPEncoder::new_lossless(out)),
+        "jpg" | "jpeg" => encode!(image::codecs::jpeg::JpegEncoder::new(out)),
+        "tiff" | "tif" => encode!(image::codecs::tiff::TiffEncoder::new(out)),
+        // Unreachable: format_holds_metadata covers exactly the arms above.
+        _ => Err(anyhow::anyhow!("No encoder for {}", path)),
+    }
+}
+
 /// Writes a single image, routing `.jxl` through libjxl and everything else
 /// through the `image` crate.
-fn write_one(img: &RgbaImage, path: &str) -> Result<()> {
+fn write_one(img: &RgbaImage, path: &str, meta: Metadata) -> Result<()> {
     if has_extension(path, "jxl") {
-        encode_jxl(img, path)
-    } else {
-        img.save(path)
-            .map_err(|e| anyhow::anyhow!("Failed to save {}: {}", path, e))
+        return encode_jxl(img, path);
     }
+    if meta.is_empty() || !format_holds_metadata(path) {
+        return img
+            .save(path)
+            .map_err(|e| anyhow::anyhow!("Failed to save {}: {}", path, e));
+    }
+
+    // JPEG has no alpha channel, and an encoder built by hand does not get the
+    // conversion `save` would have done for us.
+    if has_extension(path, "jpg") || has_extension(path, "jpeg") {
+        let rgb: image::RgbImage = ImageBuffer::from_fn(img.width(), img.height(), |x, y| {
+            let p = img.get_pixel(x, y).0;
+            image::Rgb([p[0], p[1], p[2]])
+        });
+        return encode_with_metadata(
+            path,
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            image::ExtendedColorType::Rgb8,
+            meta,
+        );
+    }
+
+    encode_with_metadata(
+        path,
+        img.as_raw(),
+        img.width(),
+        img.height(),
+        image::ExtendedColorType::Rgba8,
+        meta,
+    )
+}
+
+/// Writes an image at the depth it already has, for the targets that can hold
+/// more than 8 bits per channel.
+///
+/// Never splits, and does not need to: the formats that reach it (JXL through
+/// its own encoder, PNG and TIFF here) all take an image of any height, and the
+/// one format that does split cannot hold deep pixels anyway.
+fn write_dynamic(img: &image::DynamicImage, path: &str, meta: Metadata) -> Result<()> {
+    if meta.is_empty() || !format_holds_metadata(path) {
+        return img
+            .save(path)
+            .map_err(|e| anyhow::anyhow!("Failed to save {}: {}", path, e));
+    }
+    encode_with_metadata(
+        path,
+        img.as_bytes(),
+        img.width(),
+        img.height(),
+        img.color().into(),
+        meta,
+    )
+}
+
+/// True when [`encode_with_metadata`] has an encoder for `path`'s format.
+fn format_holds_metadata(path: &str) -> bool {
+    has_any_extension(path, &["png", "webp", "jpg", "jpeg", "tiff", "tif"])
 }
 
 /// Saves `img` to `output_path`, splitting it into numbered parts when the
@@ -300,6 +814,14 @@ fn write_one(img: &RgbaImage, path: &str) -> Result<()> {
 /// quality. A failed write takes its own partial output with it, leaving no
 /// half-converted set of parts on disk.
 pub fn save_image(img: &RgbaImage, output_path: &str) -> Result<Vec<String>> {
+    save_image_with(img, output_path, Metadata::default())
+}
+
+/// [`save_image`], embedding what a converted source carried beside its pixels.
+///
+/// A fresh capture has no metadata to carry, which is why [`save_image`] is the
+/// whole story for the capture path.
+fn save_image_with(img: &RgbaImage, output_path: &str, meta: Metadata) -> Result<Vec<String>> {
     let path = std::path::Path::new(output_path);
 
     // Splitting is vertical only, so an over-wide image has no fallback.
@@ -312,7 +834,7 @@ pub fn save_image(img: &RgbaImage, output_path: &str) -> Result<Vec<String>> {
     }
 
     let Some(max_height) = max_part_height(path).filter(|max| img.height() > *max) else {
-        write_one(img, output_path).inspect_err(|_| {
+        write_one(img, output_path, meta).inspect_err(|_| {
             let _ = std::fs::remove_file(output_path);
         })?;
         return Ok(vec![output_path.to_string()]);
@@ -333,7 +855,7 @@ pub fn save_image(img: &RgbaImage, output_path: &str) -> Result<Vec<String>> {
         let name = format!("{}_{:0>width$}.{}", stem, i + 1, ext, width = digits);
         let part_path = path.with_file_name(&name).to_string_lossy().into_owned();
         let part = image::imageops::crop_imm(img, 0, y, img.width(), part_height).to_image();
-        if let Err(e) = write_one(&part, &part_path) {
+        if let Err(e) = write_one(&part, &part_path, meta) {
             let _ = std::fs::remove_file(&part_path);
             for done in &written {
                 let _ = std::fs::remove_file(done);
@@ -399,6 +921,291 @@ fn verify_written_matches(source: &RgbaImage, written: &[String]) -> Result<()> 
     Ok(())
 }
 
+/// What a conversion actually proved, so the log cannot claim more than was
+/// checked.
+///
+/// Lossless here means lossless against the **original file**, which is a higher
+/// bar than matching pixels and not one every route can clear. Only a transcoded
+/// JPEG can be turned back into the file it came from; for a source that was
+/// lossless to begin with, the file's bytes hold no image information the pixels
+/// and metadata do not, so matching those is the whole of it.
+#[derive(Clone, Copy)]
+enum Proof {
+    /// The original file can be rebuilt from the result, byte for byte.
+    FileBytes,
+    /// Pixels and carried metadata match. The file's own bytes are not
+    /// reproducible, since re-encoding picks its own filters and layout.
+    Pixels,
+}
+
+impl Proof {
+    fn describe(self) -> &'static str {
+        match self {
+            Proof::FileBytes => "Verified byte for byte against",
+            Proof::Pixels => "Verified pixels and carried metadata against",
+        }
+    }
+}
+
+/// Bits per channel, which is what "did this conversion drop half the data"
+/// turns on. `ColorType` spells depth and channel count together, so a 16-bit
+/// grayscale and a 16-bit RGBA have to compare equal here.
+fn bits_per_channel(color: image::ColorType) -> u16 {
+    color.bits_per_pixel() / u16::from(color.channel_count())
+}
+
+/// What an image file holds, kept apart because an animation has to be compared
+/// frame by frame and a still image has to keep its own bit depth.
+enum Pixels {
+    Still(image::DynamicImage),
+    /// RGBA8 because that is all `AnimationDecoder` hands back. Nothing this
+    /// program reads stores an animation deeper than 8 bits.
+    Frames(Vec<RgbaImage>),
+}
+
+/// Reads `path` as pixels, picking up every frame when it is animated.
+///
+/// `image::open` silently keeps only the first frame, which is exactly the loss
+/// this has to be able to see.
+fn read_pixels(path: &std::path::Path) -> Result<Pixels> {
+    use image::AnimationDecoder;
+
+    let open = |p: &std::path::Path| -> Result<std::io::BufReader<std::fs::File>> {
+        Ok(std::io::BufReader::new(std::fs::File::open(p).map_err(
+            |e| anyhow::anyhow!("Failed to open {}: {}", p.display(), e),
+        )?))
+    };
+    let frames = |f: image::Frames| -> Result<Vec<RgbaImage>> {
+        Ok(f.collect_frames()
+            .map_err(|e| anyhow::anyhow!("Failed to read frames of {}: {}", path.display(), e))?
+            .into_iter()
+            .map(|frame| frame.into_buffer())
+            .collect())
+    };
+    let bad = |e: image::ImageError| anyhow::anyhow!("Failed to read {}: {}", path.display(), e);
+
+    if has_extension(path, "gif") {
+        let decoder = image::codecs::gif::GifDecoder::new(open(path)?).map_err(bad)?;
+        return Ok(Pixels::Frames(frames(decoder.into_frames())?));
+    }
+    if has_extension(path, "png") {
+        let decoder = image::codecs::png::PngDecoder::new(open(path)?).map_err(bad)?;
+        if decoder.is_apng().map_err(bad)? {
+            let apng = decoder.apng().map_err(bad)?;
+            return Ok(Pixels::Frames(frames(apng.into_frames())?));
+        }
+        return Ok(Pixels::Still(
+            image::DynamicImage::from_decoder(decoder).map_err(bad)?,
+        ));
+    }
+    if has_extension(path, "webp") {
+        let decoder = image::codecs::webp::WebPDecoder::new(open(path)?).map_err(bad)?;
+        if decoder.has_animation() {
+            return Ok(Pixels::Frames(frames(decoder.into_frames())?));
+        }
+        return Ok(Pixels::Still(
+            image::DynamicImage::from_decoder(decoder).map_err(bad)?,
+        ));
+    }
+    if has_extension(path, "jxl") {
+        return Ok(Pixels::Still(image::DynamicImage::ImageRgba8(decode_jxl(
+            &path.to_string_lossy(),
+        )?)));
+    }
+
+    Ok(Pixels::Still(image::open(path).map_err(bad)?))
+}
+
+/// Checks two images hold the same pixels at the same depth.
+///
+/// Channel layout is allowed to differ — a grayscale image that comes back as
+/// gray written into three channels lost nothing, and a decoder is free to make
+/// that choice. Bit depth is not, since dropping from 16 bits to 8 is the silent
+/// loss worth failing over.
+fn dynamic_match(
+    a: &image::DynamicImage,
+    b: &image::DynamicImage,
+    a_name: &str,
+    b_name: &str,
+) -> Result<()> {
+    let (a_bits, b_bits) = (bits_per_channel(a.color()), bits_per_channel(b.color()));
+    if a_bits != b_bits {
+        return Err(anyhow::anyhow!(
+            "{} holds {} bits per channel, but {} came back with {}",
+            a_name,
+            a_bits,
+            b_name,
+            b_bits
+        ));
+    }
+    if (a.width(), a.height()) != (b.width(), b.height()) {
+        return Err(anyhow::anyhow!(
+            "{} is {}x{}, but {} came back {}x{}",
+            a_name,
+            a.width(),
+            a.height(),
+            b_name,
+            b.width(),
+            b.height()
+        ));
+    }
+    let same = if a_bits > 8 {
+        a.to_rgba16() == b.to_rgba16()
+    } else {
+        a.to_rgba8() == b.to_rgba8()
+    };
+    if !same {
+        return Err(anyhow::anyhow!(
+            "{} does not hold the same pixels as {}",
+            b_name,
+            a_name
+        ));
+    }
+    Ok(())
+}
+
+/// Checks that `converted` holds every pixel `source` did: at the same bit
+/// depth, and frame for frame when either is animated.
+///
+/// Channel layout is allowed to differ — a grayscale source that comes back as
+/// gray written into three channels lost nothing, and a decoder is free to make
+/// that choice. Bit depth is not allowed to differ, since dropping from 16 bits
+/// to 8 is the silent loss worth failing over.
+fn pixels_match(source: &std::path::Path, converted: &std::path::Path) -> Result<()> {
+    match (read_pixels(source)?, read_pixels(converted)?) {
+        (Pixels::Still(a), Pixels::Still(b)) => dynamic_match(
+            &a,
+            &b,
+            &source.display().to_string(),
+            &converted.display().to_string(),
+        ),
+        (Pixels::Frames(a), Pixels::Frames(b)) => {
+            if a.len() != b.len() {
+                return Err(anyhow::anyhow!(
+                    "{} has {} frames, but {} came back with {}",
+                    source.display(),
+                    a.len(),
+                    converted.display(),
+                    b.len()
+                ));
+            }
+            for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+                if x != y {
+                    return Err(anyhow::anyhow!(
+                        "{} differs from {} at frame {}",
+                        converted.display(),
+                        source.display(),
+                        i + 1
+                    ));
+                }
+            }
+            Ok(())
+        }
+        (Pixels::Frames(a), Pixels::Still(_)) => Err(anyhow::anyhow!(
+            "{} has {} frames, but {} came back as a single image",
+            source.display(),
+            a.len(),
+            converted.display()
+        )),
+        (Pixels::Still(_), Pixels::Frames(b)) => Err(anyhow::anyhow!(
+            "{} is a single image, but {} came back with {} frames",
+            source.display(),
+            converted.display(),
+            b.len()
+        )),
+    }
+}
+
+/// Proves that the JXL cjxl wrote straight from `source` gives `source` back.
+///
+/// A transcoded JPEG can be reconstructed as the original file, so that is
+/// compared byte for byte — a stronger claim than any pixel check, and the one
+/// worth making before deleting a JPEG. Everything else is compared as pixels
+/// at its own depth, animation included.
+fn verify_jxl_matches_source(source: &std::path::Path, jxl: &str) -> Result<Proof> {
+    let jpeg_source = has_extension(source, "jpg") || has_extension(source, "jpeg");
+    let temp = TempFile::new(if jpeg_source { "jpg" } else { "png" });
+
+    let result = std::process::Command::new("djxl")
+        .arg(jxl)
+        .arg(temp.path())
+        .arg("--quiet")
+        .output()
+        .map_err(|e| anyhow::anyhow!("Failed to run djxl: {}\n{}", e, JXL_TOOLS_HINT))?;
+    if !result.status.success() {
+        return Err(anyhow::anyhow!(
+            "djxl could not read {} back: {}",
+            jxl,
+            String::from_utf8_lossy(&result.stderr).trim()
+        ));
+    }
+
+    if !jpeg_source {
+        pixels_match(source, temp.path())?;
+        return Ok(Proof::Pixels);
+    }
+
+    let original = std::fs::read(source)
+        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", source.display(), e))?;
+    let restored = std::fs::read(temp.path())
+        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", temp.path().display(), e))?;
+    if original != restored {
+        return Err(anyhow::anyhow!(
+            "{} does not reconstruct {} byte for byte",
+            jxl,
+            source.display()
+        ));
+    }
+    Ok(Proof::FileBytes)
+}
+
+/// Proves a converted file holds the pixels the conversion started from.
+///
+/// The reference is the image in hand, not the file on disk: the pixels may have
+/// been rotated to bake in an Exif orientation the target cannot carry, in which
+/// case the source file no longer says what the output should look like.
+fn verify_converted(
+    source: &SourceImage,
+    written: &[String],
+    target_ext: &str,
+    source_name: &str,
+) -> Result<Proof> {
+    if target_ext == "jxl" {
+        let temp = TempFile::new("png");
+        let result = std::process::Command::new("djxl")
+            .arg(&written[0])
+            .arg(temp.path())
+            .arg("--quiet")
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to run djxl: {}\n{}", e, JXL_TOOLS_HINT))?;
+        if !result.status.success() {
+            return Err(anyhow::anyhow!(
+                "djxl could not read {} back: {}",
+                written[0],
+                String::from_utf8_lossy(&result.stderr).trim()
+            ));
+        }
+        let got = image::open(temp.path())
+            .map_err(|e| anyhow::anyhow!("Failed to read {} back: {}", written[0], e))?;
+        dynamic_match(&source.img, &got, source_name, &written[0])?;
+        return Ok(Proof::Pixels);
+    }
+
+    if written.len() == 1 {
+        let got = image::open(&written[0])
+            .map_err(|e| anyhow::anyhow!("Failed to read {} back: {}", written[0], e))?;
+        dynamic_match(&source.img, &got, source_name, &written[0])?;
+        return Ok(Proof::Pixels);
+    }
+
+    // Only WebP splits, and it is 8-bit, so the stacked comparison loses nothing.
+    match &source.img {
+        image::DynamicImage::ImageRgba8(img) => verify_written_matches(img, written),
+        other => verify_written_matches(&other.to_rgba8(), written),
+    }?;
+    Ok(Proof::Pixels)
+}
+
 /// [`save_image`], but a failed JXL encode falls back to lossless WebP rather
 /// than losing the image.
 ///
@@ -427,8 +1234,12 @@ pub fn save_image_or_webp(img: &RgbaImage, output_path: &str) -> Result<Vec<Stri
     save_image(img, &fallback.to_string_lossy())
 }
 
-/// Extensions the folder-wide tools accept as input.
-const IMAGE_EXTENSIONS: &[&str] = &["jxl", "png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif"];
+/// Extensions the folder-wide tools accept as input. GIF is here because cjxl
+/// takes a GIF file whole, animation included, so a folder pass no longer has a
+/// reason to walk past one.
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "jxl", "png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "tif",
+];
 
 /// Lists the image files directly inside `folder_path`, sorted by name.
 /// Subfolders are left alone, so a folder-wide pass never reaches further than
@@ -818,7 +1629,45 @@ impl ScreenCapture {
             ));
         }
 
-        let img = if merged_stem.is_some() {
+        // Anything cjxl reads itself is handed over as a file. Decoding it first
+        // is what makes a JPEG grow, and what drops bit depth, metadata and
+        // frames on everything else. Merged parts cannot go this way: stacking
+        // them needs the pixels.
+        if merged_stem.is_none()
+            && target_ext == "jxl"
+            && has_any_extension(first, CJXL_DIRECT_INPUT)
+        {
+            let size = match image::image_dimensions(first) {
+                Ok((w, h)) => format!(" ({}x{})", w, h),
+                Err(_) => String::new(),
+            };
+            self.log(
+                log::Level::Info,
+                &format!("Handing {}{} to cjxl as it is", first_path, size),
+            );
+            match encode_jxl_from_file(first, &output_path) {
+                Ok(()) => {
+                    self.log(log::Level::Info, &format!("Saved: {}", output_path));
+                    if delete_original {
+                        let proof = verify_jxl_matches_source(first, &output_path);
+                        self.delete_originals(inputs, std::slice::from_ref(&output_path), proof)?;
+                    }
+                    return Ok(Converted::Written(vec![output_path]));
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&output_path);
+                    self.log(
+                        log::Level::Warn,
+                        &format!(
+                            "cjxl would not take {} as it is, so its pixels are being re-encoded instead, which may make the result larger than the source: {}",
+                            first_path, e
+                        ),
+                    );
+                }
+            }
+        }
+
+        if merged_stem.is_some() {
             self.log(
                 log::Level::Info,
                 &format!(
@@ -828,76 +1677,130 @@ impl ScreenCapture {
                     output_path
                 ),
             );
-            match merge_parts(inputs)? {
-                Some(img) => {
-                    self.log(
-                        log::Level::Info,
-                        &format!("Merged: {}x{}", img.width(), img.height()),
-                    );
-                    img
-                }
-                None => {
-                    self.log(
-                        log::Level::Info,
-                        &format!(
-                            "{}_1..{} differ in width, so they are not one split image — converting them separately",
-                            stem,
-                            inputs.len()
-                        ),
-                    );
-                    return Ok(Converted::NotOneImage);
-                }
-            }
-        } else {
-            let img = open_image(&first_path)?;
+            let Some(img) = merge_parts(inputs)? else {
+                self.log(
+                    log::Level::Info,
+                    &format!(
+                        "{}_1..{} differ in width, so they are not one split image — converting them separately",
+                        stem,
+                        inputs.len()
+                    ),
+                );
+                return Ok(Converted::NotOneImage);
+            };
             self.log(
                 log::Level::Info,
-                &format!("Loaded: {} ({}x{})", first_path, img.width(), img.height()),
+                &format!("Merged: {}x{}", img.width(), img.height()),
             );
-            img
-        };
 
-        let written = save_image(&img, &output_path)?;
+            let written = self.save_and_log(save_image(&img, &output_path)?, img.height());
+            if delete_original {
+                // The parts were written from 8-bit RGBA by this program, so
+                // comparing the stacked pixels is the whole of what there is.
+                let proof = verify_written_matches(&img, &written).map(|()| Proof::Pixels);
+                self.delete_originals(inputs, &written, proof)?;
+            }
+            return Ok(Converted::Written(written));
+        }
+
+        let mut source = open_source_image(&first_path)?;
+        self.log(
+            log::Level::Info,
+            &format!(
+                "Loaded: {} ({}x{}, {} bits per channel)",
+                first_path,
+                source.img.width(),
+                source.img.height(),
+                source.bits_per_channel()
+            ),
+        );
+
+        if !format_holds_exif(target_ext) && source.bake_orientation() {
+            self.log(
+                log::Level::Info,
+                &format!(
+                    "Rotated the pixels to match the Exif orientation, since {} cannot carry the tag",
+                    target_ext
+                ),
+            );
+        }
+
+        let lost = source.losses_for(target_ext);
+        for reason in &lost {
+            self.log(log::Level::Warn, reason);
+        }
+
+        let height = source.img.height();
+        let written =
+            self.save_and_log(write_converted(&source, &output_path, target_ext)?, height);
+
+        if delete_original {
+            let proof = if lost.is_empty() {
+                verify_converted(&source, &written, target_ext, &first_path)
+            } else {
+                Err(anyhow::anyhow!(
+                    "This conversion could not carry everything the source holds:\n  {}",
+                    lost.join("\n  ")
+                ))
+            };
+            self.delete_originals(inputs, &written, proof)?;
+        }
+
+        Ok(Converted::Written(written))
+    }
+
+    /// Logs what a save produced and hands the paths back unchanged.
+    fn save_and_log(&self, written: Vec<String>, height: u32) -> Vec<String> {
         if written.len() > 1 {
             self.log(
                 log::Level::Info,
                 &format!(
                     "Image is {}px tall, past the {}px page limit — split into {} parts",
-                    img.height(),
+                    height,
                     WEBP_MAX_DIMENSION,
                     written.len()
                 ),
             );
         }
         self.log(log::Level::Info, &format!("Saved: {}", written.join(", ")));
+        written
+    }
 
-        // Only once the conversion is proven lossless: an original capture
-        // cannot be redone, so "the encoder returned Ok" is not good enough.
-        if delete_original {
-            verify_written_matches(&img, &written).map_err(|e| {
-                anyhow::anyhow!(
-                    "{}\nKept the original. The converted file(s) are at: {}",
-                    e,
-                    written.join(", ")
-                )
-            })?;
-            self.log(
-                log::Level::Info,
-                &format!("Verified lossless against {}", join_paths(inputs)),
-            );
-            for input in inputs {
-                let path = input.to_string_lossy().into_owned();
-                match std::fs::remove_file(input) {
-                    Ok(()) => self.log(log::Level::Info, &format!("Deleted original: {}", path)),
-                    Err(e) => self.log(
-                        log::Level::Warn,
-                        &format!("Converted, but failed to delete {}: {}", path, e),
-                    ),
-                }
+    /// Deletes the inputs a conversion has replaced, but only if `proof` says
+    /// the result really kept everything.
+    ///
+    /// An original capture cannot be redone, so "the encoder returned Ok" is not
+    /// good enough. Each conversion path brings its own proof, because the
+    /// strongest claim available differs: a transcoded JPEG can be reconstructed
+    /// byte for byte, while a re-encode can only be compared as pixels.
+    fn delete_originals(
+        &self,
+        inputs: &[std::path::PathBuf],
+        written: &[String],
+        proof: Result<Proof>,
+    ) -> Result<()> {
+        let proof = proof.map_err(|e| {
+            anyhow::anyhow!(
+                "{}\nKept the original. The converted file(s) are at: {}",
+                e,
+                written.join(", ")
+            )
+        })?;
+        self.log(
+            log::Level::Info,
+            &format!("{} {}", proof.describe(), join_paths(inputs)),
+        );
+        for input in inputs {
+            let path = input.to_string_lossy().into_owned();
+            match std::fs::remove_file(input) {
+                Ok(()) => self.log(log::Level::Info, &format!("Deleted original: {}", path)),
+                Err(e) => self.log(
+                    log::Level::Warn,
+                    &format!("Converted, but failed to delete {}: {}", path, e),
+                ),
             }
         }
-
-        Ok(Converted::Written(written))
+        Ok(())
     }
 
     /// Converts every image directly inside `folder_path`. Returns
@@ -2687,5 +3590,424 @@ mod tests {
             let err = result.unwrap_err().to_string();
             assert!(err.contains("cjxl"), "unexpected error: {err}");
         }
+    }
+
+    /// A smooth image, which is what a JPEG is good at. [`noisy_image`] is the
+    /// worst case for DCT compression, so a JPEG of it would be larger than the
+    /// lossless encode and prove nothing about transcoding.
+    fn smooth_image(width: u32, height: u32) -> RgbaImage {
+        RgbaImage::from_fn(width, height, |x, y| {
+            let r = (x * 255 / width.max(1)) as u8;
+            let g = (y * 255 / height.max(1)) as u8;
+            image::Rgba([r, g, 128u8.wrapping_add(((x + y) / 4) as u8), 255])
+        })
+    }
+
+    /// Writes a JPEG at a quality that leaves real artifacts to carry across.
+    fn write_jpeg(path: &str, img: &RgbaImage, exif: Option<&[u8]>) -> RgbaImage {
+        use image::{ExtendedColorType, ImageEncoder};
+
+        let rgb = image::DynamicImage::ImageRgba8(img.clone()).to_rgb8();
+        let file = std::fs::File::create(path).unwrap();
+        let mut encoder =
+            image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 80);
+        if let Some(exif) = exif {
+            encoder.set_exif_metadata(exif.to_vec()).unwrap();
+        }
+        encoder
+            .write_image(
+                rgb.as_raw(),
+                rgb.width(),
+                rgb.height(),
+                ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        image::open(path).unwrap().to_rgba8()
+    }
+
+    /// A minimal little-endian Exif block holding just an orientation tag.
+    fn exif_orientation(value: u16) -> Vec<u8> {
+        let mut exif = vec![b'I', b'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00];
+        exif.extend_from_slice(&1u16.to_le_bytes()); // one entry
+        exif.extend_from_slice(&0x0112u16.to_le_bytes()); // Orientation
+        exif.extend_from_slice(&3u16.to_le_bytes()); // SHORT
+        exif.extend_from_slice(&1u32.to_le_bytes()); // one value
+        exif.extend_from_slice(&value.to_le_bytes());
+        exif.extend_from_slice(&[0, 0]); // padded to four bytes
+        exif.extend_from_slice(&0u32.to_le_bytes()); // no next IFD
+        exif
+    }
+
+    /// Writes an animated GIF, one flat frame per shade.
+    ///
+    /// The frames carry a real delay on purpose: with the zero delay
+    /// `Frame::new` gives, djxl folds the animation back into a single image, so
+    /// a zero-delay fixture would look like frame loss that is not there.
+    fn write_animated_gif(path: &str, shades: &[u8]) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut encoder = image::codecs::gif::GifEncoder::new(file);
+        for &shade in shades {
+            let frame = RgbaImage::from_pixel(32, 24, image::Rgba([shade, shade, shade, 255]));
+            encoder
+                .encode_frame(image::Frame::from_parts(
+                    frame,
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(100, 1),
+                ))
+                .expect("frame");
+        }
+    }
+
+    /// An ICC profile that libjxl will actually accept, which rules out one
+    /// invented here. Tests needing one skip where the system has none.
+    fn system_icc_profile() -> Option<Vec<u8>> {
+        [
+            "/System/Library/ColorSync/Profiles/Display P3.icc",
+            "/System/Library/ColorSync/Profiles/AdobeRGB1998.icc",
+            "/usr/share/color/icc/colord/sRGB.icc",
+        ]
+        .iter()
+        .find_map(|path| std::fs::read(path).ok())
+    }
+
+    /// Converting a JPEG must not make it bigger. The pixel path had to
+    /// re-encode every artifact the JPEG baked in, which cost several times what
+    /// the JPEG spent throwing it away.
+    #[test]
+    fn convert_jpeg_to_jxl_beats_the_source_size() {
+        needs_jxl!();
+        let dir = TempDir::new("jpeg-smaller");
+        let jpg = dir.path("photo.jpg");
+        write_jpeg(&jpg, &smooth_image(600, 800), None);
+
+        let written = ScreenCapture::new()
+            .convert_image(&jpg, "jxl", false)
+            .unwrap()
+            .unwrap();
+
+        let source = std::fs::metadata(&jpg).unwrap().len();
+        let converted = std::fs::metadata(&written[0]).unwrap().len();
+        assert!(
+            converted < source,
+            "{converted} bytes is not smaller than the {source}-byte source"
+        );
+    }
+
+    /// The point of handing cjxl the file: the original JPEG comes back whole,
+    /// which is a stronger claim than matching pixels.
+    #[test]
+    fn convert_jpeg_to_jxl_reconstructs_the_original_bytes() {
+        needs_jxl!();
+        let dir = TempDir::new("jpeg-bytes");
+        let jpg = dir.path("photo.jpg");
+        write_jpeg(&jpg, &smooth_image(320, 240), None);
+        let original = std::fs::read(&jpg).unwrap();
+
+        let written = ScreenCapture::new()
+            .convert_image(&jpg, "jxl", false)
+            .unwrap()
+            .unwrap();
+
+        let back = dir.path("back.jpg");
+        assert!(
+            std::process::Command::new("djxl")
+                .args([&written[0], &back])
+                .arg("--quiet")
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(std::fs::read(&back).unwrap(), original);
+    }
+
+    #[test]
+    fn convert_jpeg_to_jxl_deletes_original_after_verification() {
+        needs_jxl!();
+        let dir = TempDir::new("jpeg-delete");
+        let jpg = dir.path("photo.jpg");
+        write_jpeg(&jpg, &smooth_image(200, 150), None);
+
+        let written = ScreenCapture::new()
+            .convert_image(&jpg, "jxl", true)
+            .unwrap()
+            .unwrap();
+
+        assert!(!std::path::Path::new(&jpg).exists());
+        assert!(std::path::Path::new(&written[0]).exists());
+    }
+
+    /// `to_rgba8` used to halve this, and the old verification compared the
+    /// halved buffer, so `--delete-original` removed the only deep copy.
+    #[test]
+    fn convert_16bit_png_keeps_16_bits() {
+        needs_jxl!();
+        let dir = TempDir::new("deep-png");
+        let png = dir.path("deep.png");
+        let deep: image::ImageBuffer<image::Rgb<u16>, Vec<u16>> =
+            image::ImageBuffer::from_fn(64, 48, |x, y| {
+                image::Rgb([x as u16 * 1000, y as u16 * 1200, 40_000])
+            });
+        image::DynamicImage::ImageRgb16(deep).save(&png).unwrap();
+
+        let written = ScreenCapture::new()
+            .convert_image(&png, "jxl", true)
+            .unwrap()
+            .unwrap();
+
+        assert!(!std::path::Path::new(&png).exists(), "original survived");
+        let back = dir.path("back.png");
+        assert!(
+            std::process::Command::new("djxl")
+                .args([&written[0], &back])
+                .arg("--quiet")
+                .status()
+                .unwrap()
+                .success()
+        );
+        let bits = bits_per_channel(image::open(&back).unwrap().color());
+        assert_eq!(bits, 16, "came back with {bits} bits per channel");
+    }
+
+    #[test]
+    fn convert_grayscale_png_stays_grayscale() {
+        needs_jxl!();
+        let dir = TempDir::new("gray-png");
+        let png = dir.path("gray.png");
+        let gray: image::GrayImage =
+            image::ImageBuffer::from_fn(80, 60, |x, y| image::Luma([((x + y) % 256) as u8]));
+        image::DynamicImage::ImageLuma8(gray).save(&png).unwrap();
+
+        let written = ScreenCapture::new()
+            .convert_image(&png, "jxl", false)
+            .unwrap()
+            .unwrap();
+
+        let back = dir.path("back.png");
+        assert!(
+            std::process::Command::new("djxl")
+                .args([&written[0], &back])
+                .arg("--quiet")
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            image::open(&back).unwrap().color().channel_count(),
+            1,
+            "a single channel went in, so a single channel should come out"
+        );
+    }
+
+    /// `image::open` keeps only the first frame. cjxl takes the GIF whole, so
+    /// none of them are lost any more.
+    #[test]
+    fn convert_animated_gif_keeps_every_frame() {
+        needs_jxl!();
+        let dir = TempDir::new("anim-gif");
+        let gif = dir.path("anim.gif");
+        write_animated_gif(&gif, &[40, 120, 200]);
+
+        let written = ScreenCapture::new()
+            .convert_image(&gif, "jxl", false)
+            .unwrap()
+            .unwrap();
+
+        let back = dir.path("back.png");
+        assert!(
+            std::process::Command::new("djxl")
+                .args([&written[0], &back])
+                .arg("--quiet")
+                .status()
+                .unwrap()
+                .success()
+        );
+        match read_pixels(std::path::Path::new(&back)).unwrap() {
+            Pixels::Frames(frames) => assert_eq!(frames.len(), 3),
+            Pixels::Still(_) => panic!("the animation came back as one image"),
+        }
+    }
+
+    /// A target that holds one image is told to say so rather than quietly
+    /// keeping frame one.
+    #[test]
+    fn convert_animated_gif_to_png_refuses_to_delete() {
+        let dir = TempDir::new("anim-to-png");
+        let gif = dir.path("anim.gif");
+        write_animated_gif(&gif, &[10, 250]);
+
+        let err = ScreenCapture::new()
+            .convert_image(&gif, "png", true)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("frames"), "unexpected error: {err}");
+        assert!(std::path::Path::new(&gif).exists(), "original was deleted");
+    }
+
+    /// WebP is 8-bit here, so a deep source cannot survive the trip and the
+    /// original has to stay.
+    #[test]
+    fn convert_refuses_to_delete_when_bit_depth_drops() {
+        let dir = TempDir::new("depth-drop");
+        let png = dir.path("deep.png");
+        let deep: image::ImageBuffer<image::Rgb<u16>, Vec<u16>> =
+            image::ImageBuffer::from_fn(32, 32, |x, y| {
+                image::Rgb([x as u16 * 2000, y as u16 * 2000, 5])
+            });
+        image::DynamicImage::ImageRgb16(deep).save(&png).unwrap();
+
+        let err = ScreenCapture::new()
+            .convert_image(&png, "webp", true)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("8 bits per channel"),
+            "unexpected error: {err}"
+        );
+        assert!(std::path::Path::new(&png).exists(), "original was deleted");
+    }
+
+    #[test]
+    fn convert_carries_icc_profile_to_jxl() {
+        needs_jxl!();
+        let Some(profile) = system_icc_profile() else {
+            eprintln!("skipped: no system ICC profile to test with");
+            return;
+        };
+        let dir = TempDir::new("icc-jxl");
+        let png = dir.path("tagged.png");
+        write_dynamic(
+            &image::DynamicImage::ImageRgba8(smooth_image(48, 48)),
+            &png,
+            Metadata {
+                icc: Some(&profile),
+                exif: None,
+            },
+        )
+        .unwrap();
+
+        let written = ScreenCapture::new()
+            .convert_image(&png, "jxl", false)
+            .unwrap()
+            .unwrap();
+
+        let back = dir.path("back.png");
+        assert!(
+            std::process::Command::new("djxl")
+                .args([&written[0], &back])
+                .arg("--quiet")
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut decoder = image::ImageReader::open(&back)
+            .unwrap()
+            .into_decoder()
+            .unwrap();
+        assert!(
+            image::ImageDecoder::icc_profile(&mut decoder)
+                .unwrap()
+                .is_some(),
+            "the colour profile did not survive"
+        );
+    }
+
+    /// A JPEG's Exif has to reach the JXL, or the archive forgets which way up
+    /// the photo goes and what its colours meant.
+    #[test]
+    fn convert_carries_exif_to_jxl() {
+        needs_jxl!();
+        let dir = TempDir::new("exif-jxl");
+        let jpg = dir.path("photo.jpg");
+        write_jpeg(&jpg, &smooth_image(64, 96), Some(&exif_orientation(6)));
+
+        let written = ScreenCapture::new()
+            .convert_image(&jpg, "jxl", false)
+            .unwrap()
+            .unwrap();
+
+        let exif = dir.path("back.exif");
+        assert!(
+            std::process::Command::new("djxl")
+                .args([&written[0], &exif])
+                .args(["--output_format", "exif"])
+                .arg("--quiet")
+                .status()
+                .unwrap()
+                .success()
+        );
+        let carried = std::fs::read(&exif).unwrap();
+        assert!(
+            carried.windows(2).any(|w| w == 0x0112u16.to_le_bytes()),
+            "the orientation tag is not in the {} bytes that came back",
+            carried.len()
+        );
+    }
+
+    /// TIFF cannot carry Exif through this encoder, so the orientation has to go
+    /// into the pixels or the image comes out sideways.
+    #[test]
+    fn convert_bakes_orientation_for_formats_without_exif() {
+        let dir = TempDir::new("orientation");
+        let jpg = dir.path("upright.jpg");
+        write_jpeg(&jpg, &smooth_image(40, 80), Some(&exif_orientation(6)));
+
+        let written = ScreenCapture::new()
+            .convert_image(&jpg, "tiff", false)
+            .unwrap()
+            .unwrap();
+
+        let out = image::open(&written[0]).unwrap();
+        assert_eq!(
+            (out.width(), out.height()),
+            (80, 40),
+            "Rotate90 should have swapped the sides"
+        );
+    }
+
+    /// Frames that cannot be carried anywhere are worth an error, not a silent
+    /// loss. Needs a tool that writes animated WebP, since `image` cannot.
+    #[test]
+    fn convert_refuses_animated_webp() {
+        if std::process::Command::new("img2webp")
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| !s.success())
+            .unwrap_or(true)
+        {
+            eprintln!("skipped: img2webp not installed");
+            return;
+        }
+        let dir = TempDir::new("anim-webp");
+        let mut frames = Vec::new();
+        for (i, shade) in [30u8, 200].into_iter().enumerate() {
+            let path = dir.path(&format!("f{i}.png"));
+            RgbaImage::from_pixel(16, 16, image::Rgba([shade, shade, shade, 255]))
+                .save(&path)
+                .unwrap();
+            frames.push(path);
+        }
+        let webp = dir.path("anim.webp");
+        assert!(
+            std::process::Command::new("img2webp")
+                .args(["-lossless", "-o", &webp])
+                .args(&frames)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let err = ScreenCapture::new()
+            .convert_image(&webp, "jxl", false)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("animated WebP"), "unexpected error: {err}");
     }
 }

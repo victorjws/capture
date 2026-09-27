@@ -102,7 +102,7 @@ cargo run --bin capture-gui
 --output <NAME>          Output filename without extension [default: 00]
 --format <FORMAT>        jxl, webp, png, jpg, jpeg, gif, bmp, tiff, tif [default: jxl]
 --convert <PATH>         Convert an existing image or folder to --format
---delete-original        Delete the source after --convert proves it lossless
+--delete-original        Delete the source after --convert proves nothing was lost
 ```
 
 ### Output Format
@@ -110,6 +110,10 @@ cargo run --bin capture-gui
 The default is **JPEG XL**, encoded mathematically lossless (`cjxl -d 0`). On a
 690x85231 capture it comes out around **30% smaller than lossless WebP** and
 half the size of PNG, with pixels identical to the source.
+
+Converting an existing JPEG is the one exception, and it goes through
+[lossless JPEG transcoding](#converting-jpegs-and-other-formats-cjxl-reads)
+instead of `-d 0`.
 
 WebP is the best-supported fallback and is also always lossless here — the
 `image` crate's encoder has no lossy mode. Both are written the same way, so you
@@ -171,6 +175,77 @@ The new file is written next to the original under the same name, using
 `<name>_orig.*` backups from `--fix` are left alone, and an existing file with
 the target name is never overwritten.
 
+#### What "lossless" means here
+
+Lossless in this project means lossless against the **original file**, not merely
+against the pixels that come out of decoding it. That is a higher bar and not
+every route clears it in the same way:
+
+| Source | What is proven | Can the original file be rebuilt? |
+|---|---|---|
+| JPEG | byte for byte, through `djxl` | **yes** |
+| PNG, GIF, BMP, lossless WebP | pixels and carried metadata | no, but these are lossless formats: their bytes hold no image information the pixels and metadata do not |
+| lossy WebP | pixels and carried metadata | no — and cjxl cannot read WebP, so it goes through pixels and the result may be **larger** than the source |
+
+`--delete-original` says which of the two it proved: `Verified byte for byte
+against …` or `Verified pixels and carried metadata against …`.
+
+#### Converting JPEGs and other formats cjxl reads
+
+Converting to JXL hands `cjxl` the **original file** whenever it can read one —
+JPEG, PNG, APNG and GIF — instead of the pixels decoded out of it. That single
+choice is what keeps the conversion honest, and for a JPEG it is the difference
+between shrinking and doubling.
+
+A JPEG handed over as a file is **transcoded**: cjxl lifts out the quantized DCT
+coefficients without ever running an inverse DCT and repacks them with its own
+entropy coder. The image is bit-for-bit what it was and the file lands **16-22%
+smaller**, and because a `jbrd` box carries the JPEG's headers, `djxl out.jxl
+out.jpg` gives back the original file byte for byte.
+
+Decoding first would do the opposite. The pixels a JPEG decodes to carry every
+ringing and blocking artifact it baked in, and storing that noise losslessly
+costs several times what the JPEG spent throwing it away — on a 690x1600 photo,
+147KB in became 379KB out. Handing over the file gives 118KB.
+
+The same route carries what pixels alone would lose: bit depth, a grayscale
+channel count, the ICC profile, Exif, XMP, and **every frame** of an animated GIF
+or APNG.
+
+There is no equivalent trick for PNG and none is needed. PNG is filtered DEFLATE
+with no DCT coefficients to move across, and it is already lossless, so `-d 0` on
+its pixels is the right answer — usually **35-50% smaller** than the PNG.
+
+WebP, BMP and TIFF are the gap: cjxl cannot read them, so those are decoded, kept
+at their own bit depth, and re-encoded with the ICC profile and Exif passed along
+explicitly. An **animated WebP is refused** rather than quietly reduced to its
+first frame, since nothing reachable from here can hold the frames losslessly.
+
+That decoded route carries the ICC profile and Exif, and nothing else: **XMP and
+other ancillary chunks are not carried**, because the `image` crate does not
+expose them. It is not reported as a loss either, so a WebP with XMP can still be
+deleted by `--delete-original`. Files that go to cjxl whole — JPEG, PNG, APNG,
+GIF — keep their XMP, since it never passes through this program.
+
+What each target can carry:
+
+| Target | Bit depth | ICC | Exif | Frames |
+|---|---|---|---|---|
+| jxl | up to 16 | yes | yes | yes |
+| png | up to 16 | yes | yes | first only |
+| tiff | up to 16 | yes | no | first only |
+| webp, jpg | 8 | yes | yes | first only |
+| gif, bmp | 8 | no | no | first only |
+
+Where a target cannot carry Exif, the orientation is rotated into the pixels
+instead, so the image never comes out sideways. Where it can, the tag is passed
+through untouched and the pixels are left alone.
+
+The GUI's trim and crop tools are the exception to all of this: they edit pixels
+through the same 8-bit RGBA buffer the capture pipeline uses, so trimming a 16-bit
+file writes back 8 bits. They keep a `<name>_orig.<ext>` backup, so the original
+depth is still on disk.
+
 #### Merging split parts
 
 A chapter cut into `ch01_1.webp` … `ch01_N.webp` comes back as one image on the
@@ -187,10 +262,20 @@ the target format is merged too, since `ch01_1.jxl` plus `ch01_2.jxl` is still
 one chapter in two files. Converting **to** WebP never merges: the split is
 there for WebP's sake. In a folder run the whole run counts as one conversion.
 
-`--delete-original` reads the new file back and compares it to the source pixel
-for pixel first; anything that does not match keeps its original and is reported
-as a failure. For a merged run every part is deleted, and only after the merged
-file has been verified against all of them. A folder run counts converted,
+`--delete-original` reads the new file back and proves nothing was lost against
+the source first; anything that does not check out keeps its original and is
+reported as a failure. The proof is the strongest one available for that route
+(see [What "lossless" means here](#what-lossless-means-here)): a transcoded JPEG
+**byte for byte**, everything else as pixels **at its own bit depth**, and an
+animation **frame by frame** through djxl's APNG output. For a merged run every
+part is deleted, and only after the merged file has been verified against all of
+them.
+
+Deletion is refused outright when the target cannot hold something the source
+does — 16 bits going to WebP, frames going to a single-image format, Exif going to
+TIFF. The conversion still happens and its path is reported; only the original
+stays put, because a "lossless" claim that quietly drops half the bit depth is
+worse than no conversion at all. A folder run counts converted,
 skipped and failed files separately, so a broken page cannot hide among the ones
 that were already in the target format. The GUI offers the same thing in the
 **Convert** tab.

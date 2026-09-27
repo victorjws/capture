@@ -119,7 +119,7 @@ struct Args {
 
     #[arg(
         long,
-        help = "Delete the source file after --convert proves the result is lossless (originals are kept by default)"
+        help = "Delete the source file after --convert proves nothing was lost against it — byte for byte where the original can be rebuilt, pixels and metadata otherwise (originals are kept by default)"
     )]
     delete_original: bool,
 
